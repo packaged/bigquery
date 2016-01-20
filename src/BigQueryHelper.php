@@ -21,14 +21,16 @@ class BigQueryHelper
   private $_debugEnabled = false;
 
   public function __construct(
-    $gcpProject, $dataSet = null, $debugEnabled = false
+    \Google_Client $client, $gcpProject, $dataSet = null, $debugEnabled = false
   )
   {
+    $this->_client = $client;
+    $this->_gcpProject = $gcpProject;
+    $this->_debugEnabled = $debugEnabled;
     if($dataSet)
     {
       $this->_dataSet = $dataSet;
     }
-    $this->_debugEnabled = $debugEnabled;
   }
 
   protected function _debug($msg)
@@ -56,29 +58,10 @@ class BigQueryHelper
   }
 
   /**
-   * Override this to create the Google_Client object
-   *
-   * @return \Google_Client
-   */
-  protected function _makeClient()
-  {
-    return new \Google_Client();
-  }
-
-  /**
    * @return \Google_Client
    */
   public function getClient()
   {
-    if($this->_client === null)
-    {
-      $this->_client = $this->_makeClient();
-      $io = $this->_client->getIo();
-      if($io instanceof \Google_IO_Curl)
-      {
-        $io->setOptions([CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4]);
-      }
-    }
     return $this->_client;
   }
 
@@ -133,14 +116,14 @@ class BigQueryHelper
    */
   public function createDataset($description = null)
   {
-    $keyspace = $this->getDataSet();
+    $dataSet = $this->getDataSet();
     $service = $this->getService();
 
-    $this->_debug("Creating dataset " . $keyspace);
+    $this->_debug("Creating dataset " . $dataSet);
 
     $datasetReference = new \Google_Service_Bigquery_DatasetReference();
     $datasetReference->setProjectId($this->bigQueryProject());
-    $datasetReference->setDatasetId($keyspace);
+    $datasetReference->setDatasetId($dataSet);
     $dataset = new \Google_Service_Bigquery_Dataset();
     $dataset->setDatasetReference($datasetReference);
     if($description)
@@ -148,8 +131,17 @@ class BigQueryHelper
       $dataset->setDescription($description);
     }
     $options = [];
-    $service->datasets->insert($this->bigQueryProject(), $dataset, $options);
-    // TODO: Don't fail if the dataset already exists
+    try
+    {
+      $service->datasets->insert($this->bigQueryProject(), $dataset, $options);
+    }
+    catch(\Exception $e)
+    {
+      if(!stristr($e->getMessage(), 'Already Exists: Dataset'))
+      {
+        throw $e;
+      }
+    }
   }
 
   /**
@@ -380,7 +372,7 @@ class BigQueryHelper
   }
 
   /**
-   * Remove keyspace from beginning of table if it has one
+   * Remove dataset from beginning of table if it has one
    *
    * @param string $tableName
    *
@@ -395,8 +387,8 @@ class BigQueryHelper
       if($parts[0] != $this->getDataSet())
       {
         throw new \Exception(
-          'Incorrect keyspace in table name: ' . $tableName
-          . '. Expected keyspace ' . $this->getDataSet()
+          'Incorrect dataset in table name: ' . $tableName
+          . '. Expected dataset ' . $this->getDataSet()
         );
       }
       $tableName = $parts[1];
@@ -548,7 +540,7 @@ class BigQueryHelper
 
     $client = $this->getClient();
     $service = $this->getService();
-    $keyspace = $this->getDataSet();
+    $dataSet = $this->getDataSet();
 
     $client->setUseBatch(true);
     $batch = new \Google_Http_Batch($client);
@@ -582,7 +574,7 @@ class BigQueryHelper
         /** @var \Google_Http_Request $insertReq */
         $insertReq = $service->tabledata->insertAll(
           $this->bigQueryProject(),
-          $keyspace,
+          $dataSet,
           $tableName,
           $request,
           $options
@@ -616,7 +608,7 @@ class BigQueryHelper
           {
             $msg = $this->_makeErrorsMsg($insertErrors);
             $this->_debug(
-              'Errors inserting into table ' . $keyspace . '.' . $tableName . ': '
+              'Errors inserting into table ' . $dataSet . '.' . $tableName . ': '
               . $msg
             );
             $errors[$tableName] = $msg;
