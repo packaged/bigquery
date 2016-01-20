@@ -16,7 +16,7 @@ class BigQueryType
   /** YYYY-MM-DD HH:MM:SS or UNIX timestamp with up to 6 decimal places */
   const TIMESTAMP = 'timestamp';
 
-  function isValidType($type)
+  public static function isValidType($type)
   {
     switch($type)
     {
