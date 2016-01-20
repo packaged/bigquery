@@ -1,0 +1,22 @@
+{
+  "name": "packaged/bigquery",
+  "description": "Helper code for Google BigQuery",
+  "type": "library",
+  "require": {
+    "google/apiclient": "~1",
+    "packaged/helpers": "~1.0"
+  },
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "richard.gooding",
+      "email": "richard.gooding@justdevelop.it"
+    }
+  ],
+  "minimum-stability": "dev",
+  "autoload": {
+    "psr-4": {
+      "Packaged\\BigQuery\\": "src/"
+    }
+  }
+}
