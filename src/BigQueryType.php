@@ -15,4 +15,19 @@ class BigQueryType
   const RECORD = 'record';
   /** YYYY-MM-DD HH:MM:SS or UNIX timestamp with up to 6 decimal places */
   const TIMESTAMP = 'timestamp';
+
+  function isValidType($type)
+  {
+    switch($type)
+    {
+      case self::STRING:
+      case self::INTEGER:
+      case self::FLOAT:
+      case self::BOOLEAN:
+      case self::RECORD:
+      case self::TIMESTAMP:
+        return true;
+    }
+    return false;
+  }
 }
