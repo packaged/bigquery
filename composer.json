@@ -3,7 +3,7 @@
   "description": "Helper code for Google BigQuery",
   "type": "library",
   "require": {
-    "google/apiclient": "~1",
+    "google/apiclient": "~1.1",
     "packaged/helpers": "~1.0"
   },
   "license": "MIT",
