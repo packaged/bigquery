@@ -412,7 +412,7 @@ class BigQueryHelper
 
     $remainingAttempts = $totalAttempts = 5;
 
-    while($remainingAttempts > 0)
+    while(($remainingAttempts > 0) && (count($rowsToWrite) > 0))
     {
       $remainingAttempts--;
       $attemptNum = $totalAttempts - $remainingAttempts;
@@ -458,12 +458,14 @@ class BigQueryHelper
               break;
             case self::ERR_DELAYED_RETRY:
               $needDelay = true;
+              // break intentionally missing
             case self::ERR_RETRY:
               // make sure we retry after this error
               if($remainingAttempts < 1)
               {
                 $remainingAttempts++;
               }
+              // break intentionally missing
             default:
               if($remainingAttempts < 1)
               {
@@ -536,6 +538,20 @@ class BigQueryHelper
    */
   public function writeBatched(array $groupedRows)
   {
+    // Remove empty datasets
+    foreach($groupedRows as $tableName => $rows)
+    {
+      if(count($rows) < 1)
+      {
+        unset($groupedRows[$tableName]);
+      }
+    }
+    // Bail out if there is nothing to write
+    if(count($groupedRows) < 1)
+    {
+      return [];
+    }
+
     $startTime = floor(microtime(true) * 1000);
 
     $client = $this->getClient();
