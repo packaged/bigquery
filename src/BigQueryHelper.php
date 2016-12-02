@@ -113,6 +113,8 @@ class BigQueryHelper
    * Create the dataset for the current organisation
    *
    * @param string $description
+   *
+   * @throws \Exception
    */
   public function createDataset($description = null)
   {
@@ -369,6 +371,42 @@ class BigQueryHelper
       }
     }
     return $allTables;
+  }
+
+  /**
+   * Perform a callback for all tables in the dataset
+   *
+   * @param callable $callback
+   */
+  public function iterateTables(callable $callback)
+  {
+    $opts = [
+      'maxResults' => 100,
+    ];
+    $nextPageToken = true;
+    while($nextPageToken)
+    {
+      $result = $this->getService()->tables->listTables(
+        $this->bigQueryProject(),
+        $this->getDataSet(),
+        $opts
+      );
+
+      /** @var \Google_Service_Bigquery_Table[] $tables */
+      $tables = $result->getTables();
+
+      foreach($tables as $table)
+      {
+        $tableId = $table->getTableReference()->getTableId();
+        $callback($tableId);
+      }
+
+      $nextPageToken = $result->getNextPageToken();
+      if($nextPageToken)
+      {
+        $opts['pageToken'] = $nextPageToken;
+      }
+    }
   }
 
   /**
