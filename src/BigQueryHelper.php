@@ -19,6 +19,10 @@ class BigQueryHelper
   private $_tableRefs = [];
   private $_tableFields = [];
   private $_debugEnabled = false;
+  // this is used to prevent us attempting to create the dataset multiple times
+  private $_dataSetCreated = false;
+  // Used to stop multiple create table calls for the same table
+  private $_createdTables = [];
 
   public function __construct(
     \Google_Client $client, $gcpProject, $dataSet = null, $debugEnabled = false
@@ -118,31 +122,39 @@ class BigQueryHelper
    */
   public function createDataset($description = null)
   {
-    $dataSet = $this->getDataSet();
-    $service = $this->getService();
+    if(!$this->_dataSetCreated)
+    {
+      $dataSet = $this->getDataSet();
+      $service = $this->getService();
 
-    $this->_debug("Creating dataset " . $dataSet);
+      $this->_debug("Creating dataset " . $dataSet);
 
-    $datasetReference = new \Google_Service_Bigquery_DatasetReference();
-    $datasetReference->setProjectId($this->bigQueryProject());
-    $datasetReference->setDatasetId($dataSet);
-    $dataset = new \Google_Service_Bigquery_Dataset();
-    $dataset->setDatasetReference($datasetReference);
-    if($description)
-    {
-      $dataset->setDescription($description);
-    }
-    $options = [];
-    try
-    {
-      $service->datasets->insert($this->bigQueryProject(), $dataset, $options);
-    }
-    catch(\Exception $e)
-    {
-      if(!stristr($e->getMessage(), 'Already Exists: Dataset'))
+      $datasetReference = new \Google_Service_Bigquery_DatasetReference();
+      $datasetReference->setProjectId($this->bigQueryProject());
+      $datasetReference->setDatasetId($dataSet);
+      $dataset = new \Google_Service_Bigquery_Dataset();
+      $dataset->setDatasetReference($datasetReference);
+      if($description)
       {
-        throw $e;
+        $dataset->setDescription($description);
       }
+      $options = [];
+      try
+      {
+        $service->datasets->insert(
+          $this->bigQueryProject(),
+          $dataset,
+          $options
+        );
+      }
+      catch(\Exception $e)
+      {
+        if(!stristr($e->getMessage(), 'Already Exists: Dataset'))
+        {
+          throw $e;
+        }
+      }
+      $this->_dataSetCreated = true;
     }
   }
 
@@ -153,10 +165,16 @@ class BigQueryHelper
    *
    * @throws \Exception
    */
-  public function createTableForObject(IBigQueryWriteable $object)
+  public function createTableForObject(IBigQueryWriteable $object, $useTemplateTable = false)
   {
+    $tableName = $object->getBigQueryTableName();
+    if($useTemplateTable)
+    {
+      list(, $tableName,) = $this->_splitTableNameForTemplate($tableName);
+    }
+
     $this->createTable(
-      $object->getBigQueryTableName(),
+      $tableName,
       get_class($object),
       $object->getBigQuerySchema()
     );
@@ -174,34 +192,38 @@ class BigQueryHelper
    */
   public function createTable($tableName, $description, $fields)
   {
-    $tableReference = $this->getTableReference($tableName);
-
-    $this->_debug("Creating table " . $this->getDataSet() . '.' . $tableName);
-
-    $service = $this->getService();
-    $tableSchema = new \Google_Service_Bigquery_TableSchema();
-    $tableSchema->setFields($fields);
-    $bqTable = new \Google_Service_Bigquery_Table();
-    $bqTable->setDescription($description);
-    $bqTable->setTableReference($tableReference);
-    $bqTable->setSchema($tableSchema);
-    $options = [];
-    try
+    if(!isset($this->_createdTables[$tableName]))
     {
-      $service->tables->insert(
-        $this->bigQueryProject(),
-        $this->getDataSet(),
-        $bqTable,
-        $options
-      );
-    }
-    catch(\Exception $e)
-    {
-      if(!stristr($e->getMessage(), 'Already Exists: Table'))
+      $tableReference = $this->getTableReference($tableName);
+
+      $this->_debug("Creating table " . $this->getDataSet() . '.' . $tableName);
+
+      $service = $this->getService();
+      $tableSchema = new \Google_Service_Bigquery_TableSchema();
+      $tableSchema->setFields($fields);
+      $bqTable = new \Google_Service_Bigquery_Table();
+      $bqTable->setDescription($description);
+      $bqTable->setTableReference($tableReference);
+      $bqTable->setSchema($tableSchema);
+      $options = [];
+      try
       {
-        throw $e;
+        $service->tables->insert(
+          $this->bigQueryProject(),
+          $this->getDataSet(),
+          $bqTable,
+          $options
+        );
+      }
+      catch(\Exception $e)
+      {
+        if(!stristr($e->getMessage(), 'Already Exists: Table'))
+        {
+          throw $e;
+        }
       }
     }
+    $this->_createdTables[$tableName] = true;
   }
 
   /**
@@ -442,7 +464,7 @@ class BigQueryHelper
    *                                            $onSuccess($tableName, $dataKeys)
    */
   public function writeWithRetries(
-    array $rows, $onError = null, $onSuccess = null
+    array $rows, $onError = null, $onSuccess = null, $useTemplateTable = false
   )
   {
     $groupedRows = $this->_groupRowsByTable($rows);
@@ -460,7 +482,7 @@ class BigQueryHelper
         $this->_debug("Retrying write. Attempt number " . $attemptNum);
       }
 
-      $errors = $this->writeBatched($rowsToWrite);
+      $errors = $this->writeBatched($rowsToWrite, $useTemplateTable);
 
       $needDelay = false;
       $rowsToWrite = [];
@@ -468,9 +490,21 @@ class BigQueryHelper
       {
         $tags = array_keys($data);
 
-        if(isset($errors[$tableName]))
+        if($useTemplateTable)
         {
-          $error = $errors[$tableName];
+          list(, $templateTable, $suffix) = $this->_splitTableNameForTemplate(
+            $tableName
+          );
+          $errorKey = $templateTable;
+        }
+        else
+        {
+          $errorKey = $tableName;
+        }
+
+        if(isset($errors[$errorKey]))
+        {
+          $error = $errors[$errorKey];
           $msg = $error instanceof \Google_Service_Exception ? $error->getMessage(
           ) : $error;
 
@@ -480,7 +514,11 @@ class BigQueryHelper
             . " : " . $msg
           );
 
-          $errorState = $this->_handleTableError($error, $data);
+          $errorState = $this->_handleTableError(
+            $error,
+            $data,
+            $useTemplateTable
+          );
 
           switch($errorState)
           {
@@ -499,10 +537,10 @@ class BigQueryHelper
               // break intentionally missing
             case self::ERR_RETRY:
               // make sure we retry after this error
-              if($remainingAttempts < 1)
+              /*if($remainingAttempts < 1)
               {
                 $remainingAttempts++;
-              }
+              }*/
               // break intentionally missing
             default:
               if($remainingAttempts < 1)
@@ -574,7 +612,7 @@ class BigQueryHelper
    * @return string[]|\Google_Service_Exception[] An array of errors encountered during the insert, indexed
    *                  by table name
    */
-  public function writeBatched(array $groupedRows)
+  public function writeBatched(array $groupedRows, $useTemplateTable = false)
   {
     // Remove empty datasets
     foreach($groupedRows as $tableName => $rows)
@@ -601,24 +639,41 @@ class BigQueryHelper
 
     try
     {
+      // list of tables in this batch grouped by template table name
+      $tablesForTemplate = [];
+      // list of tables that were written to (list of template tables if using templates)
+      $tableList = [];
       $totalRows = $writtenRows = 0;
-      $requests = [];
       foreach($groupedRows as $tableName => $rows)
       {
         /** @var IBigQueryWriteable[] $rows */
 
         $request = new \Google_Service_Bigquery_TableDataInsertAllRequest();
         $request->setKind('bigquery#tableDataInsertAllRequest');
+        if($useTemplateTable)
+        {
+          list($fullTable, $tableName, $suffix) = $this->_splitTableNameForTemplate(
+            $tableName
+          );
+          $request->setTemplateSuffix($suffix);
+          if(isset($tablesForTemplate[$tableName]))
+          {
+            $tablesForTemplate[$tableName][] = $fullTable;
+          }
+          else
+          {
+            $tablesForTemplate[$tableName] = [$fullTable];
+          }
+        }
         $numRows = count($rows);
         $totalRows += $numRows;
+        $tableList[$tableName] = true;
 
         $bqRows = [];
         foreach($rows as $queuedRow)
         {
           $row = new \Google_Service_Bigquery_TableDataInsertAllRequestRows();
-          $row->setJson(
-            $this->_serializeForBigQuery($queuedRow)
-          );
+          $row->setJson($this->_serializeForBigQuery($queuedRow));
           $row->setInsertId($queuedRow->getBigQueryInsertId());
           $bqRows[] = $row;
         }
@@ -633,7 +688,6 @@ class BigQueryHelper
           $request,
           $options
         );
-        $requests[$tableName] = $insertReq;
         $batch->add($insertReq, $tableName);
       }
 
@@ -645,7 +699,7 @@ class BigQueryHelper
     }
 
     $errors = [];
-    foreach(array_keys($groupedRows) as $tableName)
+    foreach(array_keys($tableList) as $tableName)
     {
       if(isset($responses['response-' . $tableName]))
       {
@@ -669,7 +723,17 @@ class BigQueryHelper
           }
           else
           {
-            $writtenRows += count($groupedRows[$tableName]);
+            if($useTemplateTable)
+            {
+              foreach($tablesForTemplate[$tableName] as $fullTableName)
+              {
+                $writtenRows += count($groupedRows[$fullTableName]);
+              }
+            }
+            else
+            {
+              $writtenRows += count($groupedRows[$tableName]);
+            }
           }
         }
         else
@@ -697,6 +761,27 @@ class BigQueryHelper
   }
 
   /**
+   * Split a table name into its template table and suffix
+   *
+   * @param string $tableName
+   *
+   * @return string[]
+   * @throws \Exception
+   */
+  protected function _splitTableNameForTemplate($tableName)
+  {
+    preg_match('/^(.*)(_[0-9]{8})$/', $tableName, $matches);
+    if(count($matches) != 3)
+    {
+      throw new \Exception(
+        'Table name not suitable for using template: ' . $tableName
+      );
+    }
+    // [fullName, prefix, suffix]
+    return [$tableName, $matches[1], $matches[2]];
+  }
+
+  /**
    * Handle errors from inserts - create missing datasets and tables if
    * required and return the appropriate error state
    *
@@ -705,7 +790,7 @@ class BigQueryHelper
    *
    * @return int
    */
-  protected function _handleTableError($errorMsg, array $data)
+  protected function _handleTableError($errorMsg, array $data, $useTemplateTable = false)
   {
     $result = self::ERR_UNKNOWN;
 
@@ -725,12 +810,12 @@ class BigQueryHelper
         if(stristr($errorMsg, 'Not found: Dataset'))
         {
           $this->createDataset();
-          $this->createTableForObject($firstObj);
+          $this->createTableForObject($firstObj, $useTemplateTable);
           $result = self::ERR_DELAYED_RETRY;
         }
         else if(stristr($errorMsg, 'Not found: Table'))
         {
-          $this->createTableForObject($firstObj);
+          $this->createTableForObject($firstObj, $useTemplateTable);
           $result = self::ERR_DELAYED_RETRY;
         }
       }
@@ -755,28 +840,11 @@ class BigQueryHelper
     {
       $fieldName = $field['name'];
       $value = isset($rowData[$fieldName]) ? $rowData[$fieldName] : '';
-
-      switch($field['type'])
-      {
-        case 'integer':
-        case 'timestamp':
-          $bqData[$fieldName] = (int)$value;
-          break;
-        case 'float':
-          $bqData[$fieldName] = (float)$value;
-          break;
-        case 'boolean':
-          $bqData[$fieldName] = (bool)$value;
-          break;
-        case 'string':
-          $bqData[$fieldName] = (string)$value;
-          break;
-        default:
-          throw new \Exception(
-            "Unable to serialize data for BigQuery: Unknown type '"
-            . $field['type'] . "' for field '" . $fieldName . "'"
-          );
-      }
+      $bqData[$fieldName] = $this->_serializeField(
+        $value,
+        $field['type'],
+        $field['name']
+      );
     }
 
     $rowTimestamp = $row->getBigQueryRowTimestamp();
@@ -785,6 +853,40 @@ class BigQueryHelper
       $bqData['rowTimestamp'] = $rowTimestamp;
     }
     return $bqData;
+  }
+
+  /**
+   * @param $value
+   * @param $fieldType
+   * @param $fieldName
+   *
+   * @return bool|float|int|string
+   * @throws \Exception
+   */
+  protected function _serializeField($value, $fieldType, $fieldName)
+  {
+    switch($fieldType)
+    {
+      case 'integer':
+      case 'timestamp':
+        $tidyData = (int)$value;
+        break;
+      case 'float':
+        $tidyData = (float)$value;
+        break;
+      case 'boolean':
+        $tidyData = (bool)$value;
+        break;
+      case 'string':
+        $tidyData = (string)$value;
+        break;
+      default:
+        throw new \Exception(
+          "Unable to serialize data for BigQuery: Unknown type '"
+          . $fieldType . "' for field '" . $fieldName . "'"
+        );
+    }
+    return $tidyData;
   }
 
   /**
