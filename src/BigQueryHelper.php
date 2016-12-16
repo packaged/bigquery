@@ -751,11 +751,11 @@ class BigQueryHelper
 
     $duration = floor(microtime(true) * 1000) - $startTime;
 
-    $this->_debug(
+    /*$this->_debug(
       'Wrote ' . $writtenRows . ' of ' . $totalRows . ' rows to '
       . count($groupedRows) . ' table(s) in ' . $duration . ' ms with '
       . count($errors) . ' error(s)'
-    );
+    );*/
 
     return $errors;
   }
