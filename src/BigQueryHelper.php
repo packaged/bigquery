@@ -17,7 +17,7 @@ class BigQueryHelper
   private $_service = null;
   private $_dataSet = null;
   private $_tableRefs = [];
-  private $_tableFields = [];
+  private $_tableSchemas = [];
   private $_debugEnabled = false;
   // this is used to prevent us attempting to create the dataset multiple times
   private $_dataSetCreated = false;
@@ -228,12 +228,13 @@ class BigQueryHelper
 
   /**
    * @param string $tableName
+   * @param bool   $noCache
    *
-   * @return string[]
+   * @return \Google_Service_Bigquery_TableSchema
    */
-  public function getFieldsInTable($tableName)
+  public function getTableSchema($tableName, $noCache = false)
   {
-    if(!isset($this->_tableFields[$tableName]))
+    if($noCache || (!isset($this->_tableSchemas[$tableName])))
     {
       $table = $this->getService()->tables->get(
         $this->bigQueryProject(),
@@ -241,16 +242,37 @@ class BigQueryHelper
         $this->_trimDatasetFromTableName($tableName)
       );
       /** @var \Google_Service_Bigquery_TableSchema $schema */
-      $schema = $table->getSchema();
+      $this->_tableSchemas[$tableName] = $table->getSchema();
+    }
+    return $this->_tableSchemas[$tableName];
+  }
 
-      $fields = [];
-      foreach($schema->getFields() as $field)
+  /**
+   * @param string $tableName
+   * @param bool   $detailed if true then include name, type and mode. Otherwise just name.
+   *
+   * @return string[]
+   */
+  public function getFieldsInTable($tableName, $detailed = false)
+  {
+    $schema = $this->getTableSchema($tableName);
+    $fields = [];
+    foreach($schema->getFields() as $field)
+    {
+      if($detailed)
+      {
+        $fields[] = [
+          'name' => $field['name'],
+          'type' => $field['type'],
+          'mode' => $field['mode'],
+        ];
+      }
+      else
       {
         $fields[] = $field['name'];
       }
-      $this->_tableFields[$tableName] = $fields;
     }
-    return $this->_tableFields[$tableName];
+    return $fields;
   }
 
   /**
