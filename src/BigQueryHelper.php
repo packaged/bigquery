@@ -41,8 +41,13 @@ class BigQueryHelper
   {
     if($this->_debugEnabled)
     {
-      error_log('BigQueryHelper: ' . $msg);
+      $this->_log($msg);
     }
+  }
+
+  protected function _log($msg)
+  {
+    error_log('BigQueryHelper: ' . $msg);
   }
 
   public function setDebugEnabled($debugEnabled)
@@ -127,7 +132,7 @@ class BigQueryHelper
       $dataSet = $this->getDataSet();
       $service = $this->getService();
 
-      $this->_debug("Creating dataset " . $dataSet);
+      $this->_log("Creating dataset " . $dataSet);
 
       $datasetReference = new \Google_Service_Bigquery_DatasetReference();
       $datasetReference->setProjectId($this->bigQueryProject());
@@ -165,7 +170,9 @@ class BigQueryHelper
    *
    * @throws \Exception
    */
-  public function createTableForObject(IBigQueryWriteable $object, $useTemplateTable = false)
+  public function createTableForObject(
+    IBigQueryWriteable $object, $useTemplateTable = false
+  )
   {
     $tableName = $object->getBigQueryTableName();
     if($useTemplateTable)
@@ -196,7 +203,7 @@ class BigQueryHelper
     {
       $tableReference = $this->getTableReference($tableName);
 
-      $this->_debug("Creating table " . $this->getDataSet() . '.' . $tableName);
+      $this->_log("Creating table " . $this->getDataSet() . '.' . $tableName);
 
       $service = $this->getService();
       $tableSchema = new \Google_Service_Bigquery_TableSchema();
@@ -486,7 +493,7 @@ class BigQueryHelper
    *                                            $onSuccess($tableName, $dataKeys)
    */
   public function writeWithRetries(
-    array $rows, $onError = null, $onSuccess = null, $useTemplateTable = false
+    array $rows, $onError = null, $onSuccess = null
   )
   {
     $groupedRows = $this->_groupRowsByTable($rows);
@@ -504,31 +511,20 @@ class BigQueryHelper
         $this->_debug("Retrying write. Attempt number " . $attemptNum);
       }
 
-      $errors = $this->writeBatched($rowsToWrite, $useTemplateTable);
+      $errors = $this->writeBatched($rowsToWrite);
 
       $needDelay = false;
       $rowsToWrite = [];
       foreach($groupedRows as $tableName => $data)
       {
         $tags = array_keys($data);
-
-        if($useTemplateTable)
-        {
-          list(, $templateTable, $suffix) = $this->_splitTableNameForTemplate(
-            $tableName
-          );
-          $errorKey = $templateTable;
-        }
-        else
-        {
-          $errorKey = $tableName;
-        }
+        $errorKey = $tableName;
 
         if(isset($errors[$errorKey]))
         {
           $error = $errors[$errorKey];
-          $msg = $error instanceof \Google_Service_Exception ? $error->getMessage(
-          ) : $error;
+          $msg = $error instanceof \Google_Service_Exception
+            ? $error->getMessage() : $error;
 
           $this->_debug(
             "WARNING: Error writing to table " . $tableName
@@ -536,11 +532,7 @@ class BigQueryHelper
             . " : " . $msg
           );
 
-          $errorState = $this->_handleTableError(
-            $error,
-            $data,
-            $useTemplateTable
-          );
+          $errorState = $this->_handleTableError($error, $data);
 
           switch($errorState)
           {
@@ -629,12 +621,165 @@ class BigQueryHelper
   }
 
   /**
+   * @param IBigQueryWriteable[] $items            An array of items to write
+   *                                               to BigQuery
+   * @param bool                 $autoCreateTables If this is true then
+   *                                               datasets and tables will be
+   *                                               auto-created if they do not
+   *                                               exist. If this happens the
+   *                                               writes will be NOT retried
+   *                                               after creating the tables.
+   * @param callable|null        $onError          Function to call for each
+   *                                               set of errors. Called with
+   *                                               arguments ($tableName,
+   *                                               $tags, $error)
+   * @param callable|null        $onSuccess        Function to call for each
+   *                                               set of successfil writes.
+   *                                               Called with arguments
+   *                                               ($tableName, $tags)
+   *
+   * @retun string[] Errors encountered during the operation, indexed by table
+   *        name
+   */
+  public function writeTemplatedBatch(
+    array $items, $autoCreateTables = false,
+    callable $onError = null, callable $onSuccess = null
+  )
+  {
+    $groupedItems = $this->_groupRowsByTable($items);
+    if(count($groupedItems) < 1)
+    {
+      return [];
+    }
+
+    $startTime = microtime(true);
+    $totalRows = count($items);
+
+    $client = $this->getClient();
+    $service = $this->getService();
+    $dataSet = $this->getDataSet();
+
+    // Build the batch of requests to send to BigQuery
+    $responses = [];
+    $errors = [];
+    $client->setUseBatch(true);
+    try
+    {
+      $batch = new \Google_Http_Batch($client);
+
+      foreach($groupedItems as $fullTableName => $rows)
+      {
+        list(, $templateTable, $suffix) = $this->_splitTableNameForTemplate(
+          $fullTableName
+        );
+
+        $bqRows = [];
+        foreach($rows as $row)
+        {
+          $bqRow = new \Google_Service_Bigquery_TableDataInsertAllRequestRows();
+          $bqRow->setJson($this->_serializeForBigQuery($row));
+          $bqRow->setInsertId($row->getBigQueryInsertId());
+          $bqRows[] = $bqRow;
+        }
+
+        $request = new \Google_Service_Bigquery_TableDataInsertAllRequest();
+        $request->setKind('bigquery#tableDataInsertAllRequest');
+        $request->setTemplateSuffix($suffix);
+        $request->setRows($bqRows);
+        $options = [];
+        /** @var \Google_Http_Request $insertReq */
+        $insertReq = $service->tabledata->insertAll(
+          $this->bigQueryProject(),
+          $dataSet,
+          $templateTable,
+          $request,
+          $options
+        );
+        $batch->add($insertReq, $fullTableName);
+      }
+
+      $responses = $batch->execute();
+    }
+    finally
+    {
+      $client->setUseBatch(false);
+    }
+    $duration = microtime(true) - $startTime;
+
+    $errorRows = 0;
+    foreach(array_keys($groupedItems) as $tableName)
+    {
+      if(isset($responses['response-' . $tableName]))
+      {
+        $response = $responses['response-' . $tableName];
+
+        if($response instanceof \Google_Service_Exception)
+        {
+          $errors[$tableName] = $response->getMessage();
+        }
+        else if($response instanceof \Google_Service_Bigquery_TableDataInsertAllResponse)
+        {
+          $insertErrors = $response->getInsertErrors();
+          if(!empty($insertErrors))
+          {
+            $msg = $this->_makeErrorsMsg($insertErrors);
+            $this->_log(
+              'Errors inserting into table ' . $dataSet . '.' . $tableName
+              . ': ' . $msg
+            );
+            $errors[$tableName] = $msg;
+          }
+        }
+        else
+        {
+          $errors[$tableName] = 'Unknown response type: '
+            . get_class($response);
+        }
+      }
+      else
+      {
+        $errors[$tableName] = 'No response from BigQuery';
+      }
+
+      $tags = array_keys($groupedItems[$tableName]);
+      if(isset($errors[$tableName]))
+      {
+        $errorRows += count($tags);
+        if($onError)
+        {
+          $onError($tableName, $tags, $errors[$tableName]);
+        }
+
+        if($autoCreateTables)
+        {
+          $this->_handleTableError(
+            $errors[$tableName],
+            $groupedItems[$tableName],
+            true
+          );
+        }
+      }
+      else if($onSuccess)
+      {
+        $onSuccess($tableName, $tags);
+      }
+    }
+
+    $this->_debug(
+      'Wrote ' . ($totalRows - $errorRows) . '/' . $totalRows
+      . ' rows in ' . round($duration * 1000) . 'ms'
+    );
+
+    return $errors;
+  }
+
+  /**
    * @param IBigQueryWriteable[][] $groupedRows The rows to insert grouped by table name
    *
    * @return string[]|\Google_Service_Exception[] An array of errors encountered during the insert, indexed
    *                  by table name
    */
-  public function writeBatched(array $groupedRows, $useTemplateTable = false)
+  public function writeBatched(array $groupedRows)
   {
     // Remove empty datasets
     foreach($groupedRows as $tableName => $rows)
@@ -661,32 +806,14 @@ class BigQueryHelper
 
     try
     {
-      // list of tables in this batch grouped by template table name
-      $tablesForTemplate = [];
-      // list of tables that were written to (list of template tables if using templates)
+      // list of tables that were written to
       $tableList = [];
       $totalRows = $writtenRows = 0;
       foreach($groupedRows as $tableName => $rows)
       {
         /** @var IBigQueryWriteable[] $rows */
-
         $request = new \Google_Service_Bigquery_TableDataInsertAllRequest();
         $request->setKind('bigquery#tableDataInsertAllRequest');
-        if($useTemplateTable)
-        {
-          list($fullTable, $tableName, $suffix) = $this->_splitTableNameForTemplate(
-            $tableName
-          );
-          $request->setTemplateSuffix($suffix);
-          if(isset($tablesForTemplate[$tableName]))
-          {
-            $tablesForTemplate[$tableName][] = $fullTable;
-          }
-          else
-          {
-            $tablesForTemplate[$tableName] = [$fullTable];
-          }
-        }
         $numRows = count($rows);
         $totalRows += $numRows;
         $tableList[$tableName] = true;
@@ -745,17 +872,7 @@ class BigQueryHelper
           }
           else
           {
-            if($useTemplateTable)
-            {
-              foreach($tablesForTemplate[$tableName] as $fullTableName)
-              {
-                $writtenRows += count($groupedRows[$fullTableName]);
-              }
-            }
-            else
-            {
-              $writtenRows += count($groupedRows[$tableName]);
-            }
+            $writtenRows += count($groupedRows[$tableName]);
           }
         }
         else
@@ -843,7 +960,7 @@ class BigQueryHelper
       }
       catch(\Exception $e)
       {
-        $this->_debug(
+        $this->_log(
           "ERROR: (" . $e->getCode() . ") " . $e->getMessage() . "\n"
           . $e->getTraceAsString()
         );
