@@ -97,6 +97,51 @@ class BigQueryHelper
     return $this->_dataSet;
   }
 
+  public function runQuery($sql)
+  {
+    $query = new \Google_Service_Bigquery_QueryRequest();
+    $query->setUseQueryCache(false);
+    $query->setQuery($sql);
+    $query->setTimeoutMs(90 * 1000);
+
+    $q = new \Google_Service_Bigquery_JobConfigurationQuery();
+    $q->setQuery($sql);
+    $conf = new \Google_Service_Bigquery_JobConfiguration();
+    $conf->setQuery($q);
+    $job = new \Google_Service_Bigquery_Job();
+    $job->setConfiguration($conf);
+    $jobData = $this->runJob($job, false);
+    $jobId = $jobData->getJobReference()->getJobId();
+
+    $response = $this->getService()->jobs
+      ->query($this->bigQueryProject(), $query);
+
+    $schema = $response->getSchema();
+    if(empty($schema['fields']))
+    {
+      throw new \RuntimeException(
+        "Your report failed to load all the data available.  "
+        . "Please try refreshing the page."
+      );
+    }
+    $rowDef = [];
+    foreach($schema['fields'] as $schemaKey => $schemaData)
+    {
+      $rowDef[$schemaKey] = $schemaData['name'];
+    }
+    foreach($response->getRows() as $row)
+    {
+      $makeRow = [];
+      foreach($row['f'] as $rowKey => $rowData)
+      {
+        $makeRow[$rowDef[$rowKey]] = $rowData['v'];
+      }
+      $rows[] = $makeRow;
+    }
+
+    return $rows;
+  }
+
   /**
    * @param $bqTableName
    *
