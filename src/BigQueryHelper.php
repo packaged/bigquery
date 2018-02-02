@@ -129,6 +129,7 @@ class BigQueryHelper
     {
       $rowDef[$schemaKey] = $schemaData['name'];
     }
+    $rows = [];
     foreach($response->getRows() as $row)
     {
       $makeRow = [];
@@ -138,7 +139,6 @@ class BigQueryHelper
       }
       $rows[] = $makeRow;
     }
-
     return $rows;
   }
 
