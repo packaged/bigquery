@@ -1,40 +1,46 @@
 <?php
 namespace Packaged\BigQuery;
 
-use Packaged\Helpers\Objects;
+use Google\Cloud\BigQuery\BigQueryClient;
+use Google\Cloud\BigQuery\Dataset;
+use Google\Cloud\BigQuery\Job;
+use Google\Cloud\BigQuery\QueryResults;
+use Google\Cloud\Core\Exception\ConflictException;
+use Google\Cloud\Core\Exception\NotFoundException;
 
 class BigQueryHelper
 {
-  const ERR_OK = 0; // no error
-  const ERR_RETRY = 1; // error that needs a retry (normal exponential backoff)
-  const ERR_DELAYED_RETRY = 2; // error that needs a delayed retry (e.g. after creating a table)
-  const ERR_FATAL = 3; // fatal error that can't be retried
-  const ERR_UNKNOWN = 4; // Any other error
-
-  private $_gcpProject;
-  /** @var \Google_Client */
+  private $_credentials;
+  /** @var BigQueryClient */
   private $_client = null;
-  private $_service = null;
-  private $_dataSet = null;
-  private $_tableRefs = [];
-  private $_tableSchemas = [];
+  private $_dataSetName = null;
   private $_debugEnabled = false;
-  // this is used to prevent us attempting to create the dataset multiple times
-  private $_dataSetCreated = false;
-  // Used to stop multiple create table calls for the same table
-  private $_createdTables = [];
 
-  public function __construct(
-    \Google_Client $client, $gcpProject, $dataSet = null, $debugEnabled = false
-  )
+  // Internal caching
+  /** @var array[] Caches table schemas */
+  private $_tableSchemas = [];
+  /** @var bool Prevents us from attempting to create the dataset multiple times */
+  private $_dataSetExists = false;
+  /** @var array Stops us doing multiple create table calls for the same table */
+  private $_createdTables = [];
+  /** @var Dataset Caches the dataset object */
+  private $_dataSet = null;
+
+  /**
+   * BigQueryHelper constructor.
+   *
+   * @param string|array $credentials Path to a credentials file, JSON string of credentials file content, or array
+   *                                  containing the decoded JSON
+   * @param string|null  $dataSet
+   * @param bool         $debugEnabled
+   *
+   * @throws BigQueryException
+   */
+  public function __construct($credentials = null, $dataSet = null, $debugEnabled = false)
   {
-    $this->_client = $client;
-    $this->_gcpProject = $gcpProject;
+    $this->_credentials = $this->_loadCredentials($credentials);
+    $this->_dataSetName = $dataSet;
     $this->_debugEnabled = $debugEnabled;
-    if($dataSet)
-    {
-      $this->_dataSet = $dataSet;
-    }
   }
 
   protected function _debug($msg)
@@ -61,106 +67,83 @@ class BigQueryHelper
     return $this->_debugEnabled;
   }
 
-  public function bigQueryProject()
+  public function gcpProjectName()
   {
-    return $this->_gcpProject;
+    return $this->_credentials['project_id'];
   }
 
   /**
-   * @return \Google_Client
+   * @param string|array $credentials
+   *
+   * @return array
+   * @throws BigQueryException
+   */
+  private function _loadCredentials($credentials)
+  {
+    // Load/decode credentials
+    if(is_string($credentials))
+    {
+      if(file_exists($credentials))
+      {
+        if(!is_file($credentials))
+        {
+          throw new BigQueryException('The specified credentials file is not a file');
+        }
+        $credentials = file_get_contents($credentials);
+      }
+
+      $decoded = json_decode($credentials, true);
+      if(!$decoded)
+      {
+        throw new BigQueryException('The provided credentials are not in valid JSON format');
+      }
+      $credentials = $decoded;
+    }
+    if((!is_array($credentials)) || (empty($credentials['project_id'])))
+    {
+      throw new BigQueryException(('Invalid credentials provided'));
+    }
+    return $credentials;
+  }
+
+  /**
+   * @return BigQueryClient
    */
   public function getClient()
   {
+    if($this->_client === null)
+    {
+      $this->_client = new BigQueryClient(['keyFile' => $this->_credentials]);
+    }
     return $this->_client;
   }
 
-  /**
-   * @return \Google_Service_Bigquery
-   */
-  public function getService()
+  public function setDataSetName($name)
   {
-    if($this->_service === null)
+    if($name != $this->_dataSetName)
     {
-      $this->_service = new \Google_Service_Bigquery($this->getClient());
+      $this->_dataSetName = $name;
+      $this->_dataSet = null;
     }
-    return $this->_service;
+    return $this;
   }
 
-  public function setDataSet($dataSet)
+  public function getDataSetName()
   {
-    $this->_dataSet = $dataSet;
-    return $this;
+    return $this->_dataSetName;
   }
 
   public function getDataSet()
   {
-    return $this->_dataSet;
-  }
-
-  public function runQuery($sql)
-  {
-    $query = new \Google_Service_Bigquery_QueryRequest();
-    $query->setUseQueryCache(false);
-    $query->setQuery($sql);
-    $query->setTimeoutMs(90 * 1000);
-
-    $q = new \Google_Service_Bigquery_JobConfigurationQuery();
-    $q->setQuery($sql);
-    $conf = new \Google_Service_Bigquery_JobConfiguration();
-    $conf->setQuery($q);
-    $job = new \Google_Service_Bigquery_Job();
-    $job->setConfiguration($conf);
-    $jobData = $this->runJob($job, false);
-    $jobId = $jobData->getJobReference()->getJobId();
-
-    $response = $this->getService()->jobs
-      ->query($this->bigQueryProject(), $query);
-
-    $schema = $response->getSchema();
-    if(empty($schema['fields']))
+    if(!$this->_dataSet)
     {
-      throw new \RuntimeException(
-        "Your report failed to load all the data available.  "
-        . "Please try refreshing the page."
-      );
-    }
-    $rowDef = [];
-    foreach($schema['fields'] as $schemaKey => $schemaData)
-    {
-      $rowDef[$schemaKey] = $schemaData['name'];
-    }
-    $rows = [];
-    foreach($response->getRows() as $row)
-    {
-      $makeRow = [];
-      foreach($row['f'] as $rowKey => $rowData)
+      $this->_dataSet = $this->getClient()->dataset($this->getDataSetName());
+      if(!$this->_dataSetExists)
       {
-        $makeRow[$rowDef[$rowKey]] = $rowData['v'];
+        $this->_dataSetExists = $this->_dataSet->exists();
       }
-      $rows[] = $makeRow;
     }
-    return $rows;
-  }
-
-  /**
-   * @param $bqTableName
-   *
-   * @return \Google_Service_Bigquery_TableReference
-   * @throws \Exception
-   */
-  public function getTableReference($bqTableName)
-  {
-    $bqTableName = $this->_trimDatasetFromTableName($bqTableName);
-
-    if(!isset($this->_tableRefs[$bqTableName]))
-    {
-      $tableReference = new \Google_Service_Bigquery_TableReference();
-      $tableReference->setDatasetId($this->getDataSet());
-      $tableReference->setProjectId($this->bigQueryProject());
-      $tableReference->setTableId($bqTableName);
-      $this->_tableRefs[$bqTableName] = $tableReference;
-    }
-    return $this->_tableRefs[$bqTableName];
+    return $this->_dataSet;
   }
 
   /**
@@ -168,43 +151,27 @@ class BigQueryHelper
    *
    * @param string $description
    *
-   * @throws \Exception
+   * @throws ConflictException
    */
   public function createDataset($description = null)
   {
-    if(!$this->_dataSetCreated)
+    if(!$this->_dataSetExists)
     {
-      $dataSet = $this->getDataSet();
-      $service = $this->getService();
-
-      $this->_log("Creating dataset " . $dataSet);
-
-      $datasetReference = new \Google_Service_Bigquery_DatasetReference();
-      $datasetReference->setProjectId($this->bigQueryProject());
-      $datasetReference->setDatasetId($dataSet);
-      $dataset = new \Google_Service_Bigquery_Dataset();
-      $dataset->setDatasetReference($datasetReference);
-      if($description)
-      {
-        $dataset->setDescription($description);
-      }
-      $options = [];
+      $dataSetName = $this->getDataSetName();
+      $this->_log("Creating dataset " . $dataSetName);
       try
       {
-        $service->datasets->insert(
-          $this->bigQueryProject(),
-          $dataset,
-          $options
-        );
+        $this->getClient()->createDataset($dataSetName, ['description' => $description]);
       }
-      catch(\Exception $e)
+      catch(ConflictException $e)
       {
-        if(!stristr($e->getMessage(), 'Already Exists: Dataset'))
+        // ConflictException with code 409 is "already exists" so only throw if that's not the code
+        if($e->getCode() != 409)
         {
           throw $e;
         }
       }
-      $this->_dataSetCreated = true;
+      $this->_dataSetExists = true;
     }
   }
 
@@ -212,12 +179,12 @@ class BigQueryHelper
    * Create a new table for a given IBigQueryWriteable object
    *
    * @param IBigQueryWriteable $object
+   * @param bool               $useTemplateTable If true then use template tables to write the data
    *
-   * @throws \Exception
+   * @throws BigQueryException
+   * @throws ConflictException
    */
-  public function createTableForObject(
-    IBigQueryWriteable $object, $useTemplateTable = false
-  )
+  public function createTableForObject(IBigQueryWriteable $object, $useTemplateTable = false)
   {
     $tableName = $object->getBigQueryTableName();
     if($useTemplateTable)
@@ -240,36 +207,27 @@ class BigQueryHelper
    * @param array  $fields Array of fields where each field is in this format:
    *                       ['name' => 'fieldName', 'type' => 'integer', 'mode' => 'required']
    *
-   * @throws \Exception
+   * @throws BigQueryException
+   * @throws ConflictException
    */
   public function createTable($tableName, $description, $fields)
   {
+    $tableName = $this->_trimDatasetFromTableName($tableName);
     if(!isset($this->_createdTables[$tableName]))
     {
-      $tableReference = $this->getTableReference($tableName);
+      $this->_log("Creating table " . $this->getDataSetName() . '.' . $tableName);
 
-      $this->_log("Creating table " . $this->getDataSet() . '.' . $tableName);
-
-      $service = $this->getService();
-      $tableSchema = new \Google_Service_Bigquery_TableSchema();
-      $tableSchema->setFields($fields);
-      $bqTable = new \Google_Service_Bigquery_Table();
-      $bqTable->setDescription($description);
-      $bqTable->setTableReference($tableReference);
-      $bqTable->setSchema($tableSchema);
-      $options = [];
       try
       {
-        $service->tables->insert(
-          $this->bigQueryProject(),
-          $this->getDataSet(),
-          $bqTable,
-          $options
+        $this->getDataSet()->createTable(
+          $tableName,
+          ['description' => $description, 'schema' => ['fields' => $fields]]
         );
       }
-      catch(\Exception $e)
+      catch(ConflictException $e)
       {
-        if(!stristr($e->getMessage(), 'Already Exists: Table'))
+        // ConflictException with code 409 is "already exists" so only throw if that's not the code
+        if($e->getCode() != 409)
         {
           throw $e;
         }
@@ -282,19 +240,17 @@ class BigQueryHelper
    * @param string $tableName
    * @param bool   $noCache
    *
-   * @return \Google_Service_Bigquery_TableSchema
+   * @return array
+   * @throws BigQueryException
+   * @throws NotFoundException
    */
   public function getTableSchema($tableName, $noCache = false)
   {
     if($noCache || (!isset($this->_tableSchemas[$tableName])))
     {
-      $table = $this->getService()->tables->get(
-        $this->bigQueryProject(),
-        $this->getDataSet(),
-        $this->_trimDatasetFromTableName($tableName)
-      );
-      /** @var \Google_Service_Bigquery_TableSchema $schema */
-      $this->_tableSchemas[$tableName] = $table->getSchema();
+      $tableName = $this->_trimDatasetFromTableName($tableName);
+      $info = $this->getDataSet()->table($tableName)->info();
+      $this->_tableSchemas[$tableName] = $info['schema'];
     }
     return $this->_tableSchemas[$tableName];
   }
@@ -302,120 +258,29 @@ class BigQueryHelper
   /**
    * @param string $tableName
    * @param bool   $detailed if true then include name, type and mode. Otherwise just name.
+   * @param bool   $noCache
    *
-   * @return string[]
+   * @return string[]|array[]
+   * @throws BigQueryException
+   * @throws NotFoundException
    */
-  public function getFieldsInTable($tableName, $detailed = false)
+  public function getFieldsInTable($tableName, $detailed = false, $noCache = false)
   {
-    $schema = $this->getTableSchema($tableName);
-    $fields = [];
-    foreach($schema->getFields() as $field)
+    $schema = $this->getTableSchema($tableName, $noCache);
+    if($detailed)
     {
-      if($detailed)
+      return $schema['fields'];
+    }
+    $names = [];
+    foreach($schema['fields'] as $idx => $field)
+    {
+      if(!isset($field['name']))
       {
-        $fields[] = [
-          'name' => $field['name'],
-          'type' => $field['type'],
-          'mode' => $field['mode'],
-        ];
+        throw new BigQueryException('field at index ' . $idx . ' has no name: ' . print_r($field, true));
       }
-      else
-      {
-        $fields[] = $field['name'];
-      }
+      $names[] = $field['name'];
     }
-    return $fields;
-  }
-
-  /**
-   * @param \Google_Service_Bigquery_Job $job
-   * @param bool|false                   $async
-   *
-   * @return \Google_Service_Bigquery_Job
-   * @throws \Exception
-   */
-  public function runJob(\Google_Service_Bigquery_Job $job, $async = false)
-  {
-    $res = $this->getService()->jobs->insert($this->bigQueryProject(), $job);
-    if($async)
-    {
-      return $res;
-    }
-    else
-    {
-      $jobId = $res->getJobReference()->getJobId();
-      return $this->waitForJob($jobId);
-    }
-  }
-
-  /**
-   * @param $jobId
-   *
-   * @return \Google_Service_Bigquery_Job
-   * @throws \Exception
-   */
-  public function waitForJob($jobId)
-  {
-    while(true)
-    {
-      $res = $this->getService()->jobs->get($this->bigQueryProject(), $jobId);
-      /** @var \Google_Service_Bigquery_JobStatus $status */
-      $status = $res->getStatus();
-      if($status->getState() != 'RUNNING')
-      {
-        /** @var \Google_Service_Bigquery_ErrorProto $err */
-        $err = $status->getErrorResult();
-        if($err)
-        {
-          // TODO: Deal with missing tables...?
-          throw new \Exception(
-            'Error running BigQuery job ' . $jobId . ' : '
-            . json_encode(Objects::propertyValues($err))
-          );
-        }
-
-        return $res;
-      }
-      usleep(500000);
-    }
-    throw new \Exception('Error waiting for BigQuery job ' . $jobId);
-  }
-
-  /**
-   * Wait for multiple jobs to complete
-   *
-   * @param string[] $jobIds
-   *
-   * @return array
-   */
-  public function waitForJobs(array $jobIds)
-  {
-    $results = [];
-    while(count($jobIds) > 0)
-    {
-      foreach($jobIds as $k => $jobId)
-      {
-        $res = $this->getService()->jobs->get(
-          $this->bigQueryProject(),
-          $jobId
-        );
-        /** @var \Google_Service_Bigquery_JobStatus $status */
-        $status = $res->getStatus();
-        if($status->getState() != 'RUNNING')
-        {
-          /** @var \Google_Service_Bigquery_ErrorProto $err */
-          $err = $status->getErrorResult();
-          $results[$jobId] = [
-            'response' => $res,
-            'status'   => $status->getState(),
-            'error'    => $err
-          ];
-          unset($jobIds[$k]);
-        }
-      }
-      usleep(500000);
-    }
-    return $results;
+    return $names;
   }
 
   /**
@@ -425,84 +290,116 @@ class BigQueryHelper
    */
   public function listTables()
   {
-    $allTables = $this->getAllTables();
-
     $tableNames = [];
-    foreach($allTables as $table)
-    {
-      /** @var \Google_Service_Bigquery_TableListTables $table */
-      $tableNames[] = $table->getTableReference()->getTableId();
-    }
+    $this->iterateTables(
+      function ($tableName) use (&$tableNames)
+      {
+        $tableNames[] = $tableName;
+      }
+    );
     return $tableNames;
   }
 
   /**
-   * Get all of the tables in the current dataset
-   *
-   * @return \Google_Service_Bigquery_TableListTables[]
-   * @throws \Exception
-   */
-  public function getAllTables()
-  {
-    $opts = [
-      'maxResults' => 100,
-    ];
-    $allTables = [];
-    $nextPageToken = true;
-    while($nextPageToken)
-    {
-      $result = $this->getService()->tables->listTables(
-        $this->bigQueryProject(),
-        $this->getDataSet(),
-        $opts
-      );
-
-      $tables = $result->getTables();
-      $allTables = array_merge($allTables, $tables);
-
-      $nextPageToken = $result->getNextPageToken();
-      if($nextPageToken)
-      {
-        $opts['pageToken'] = $nextPageToken;
-      }
-    }
-    return $allTables;
-  }
-
-  /**
-   * Perform a callback for all tables in the dataset
+   * Perform a callback for all tables in the dataset. The callback is called with the table name as its only argument.
    *
    * @param callable $callback
    */
   public function iterateTables(callable $callback)
   {
-    $opts = [
-      'maxResults' => 100,
-    ];
-    $nextPageToken = true;
-    while($nextPageToken)
+    $opts = ['maxResults' => 100]; // max 100 results per page
+    $tables = $this->getDataSet()->tables($opts);
+    foreach($tables->iterateByPage() as $page)
     {
-      $result = $this->getService()->tables->listTables(
-        $this->bigQueryProject(),
-        $this->getDataSet(),
-        $opts
-      );
-
-      /** @var \Google_Service_Bigquery_Table[] $tables */
-      $tables = $result->getTables();
-
-      foreach($tables as $table)
+      /** @var \Google\Cloud\BigQuery\Table $table */
+      foreach($page as $table)
       {
-        $tableId = $table->getTableReference()->getTableId();
-        $callback($tableId);
-      }
-
-      $nextPageToken = $result->getNextPageToken();
-      if($nextPageToken)
-      {
-        $opts['pageToken'] = $nextPageToken;
+        $callback($table->id());
       }
     }
+  }
+
+  /**
+   * @param string $sql
+   * @param bool   $async
+   * @param bool   $legacySql
+   * @param array  $extraQueryOpts An array of options to add to the configuration.query part of the request config
+   *
+   * @return Job|QueryResults Returns a Job if $async is true, otherwise returns QueryResults
+   */
+  public function runQuery($sql, $async = false, $legacySql = true, $extraQueryOpts = [])
+  {
+    return $this->_runQuery($sql, $async, $legacySql, $extraQueryOpts);
+  }
+
+  /**
+   * @param QueryResults $result
+   *
+   * @return array[] Array of rows, each as a key->value array
+   * @throws \Google\Cloud\BigQuery\JobException
+   * @throws \Google\Cloud\Core\Exception\GoogleException
+   */
+  public function dataFromResult(QueryResults $result)
+  {
+    $rows = [];
+    foreach($result->rows() as $row)
+    {
+      $rows[] = $row;
+    }
+    return $rows;
+  }
+
+  /**
+   * Run a query and place the results in the specified table. The destination table will be created if it does not
+   * exist, otherwise it will be truncated before writing
+   *
+   * @param string $sql
+   * @param string $destTable
+   * @param bool   $async
+   * @param bool   $legacySql
+   *
+   * @return Job|QueryResults Returns a Job if $async is true, otherwise returns QueryResults
+   */
+  public function runQueryIntoTable($sql, $destTable, $async = false, $legacySql = true)
+  {
+    $destTable = $this->_trimDatasetFromTableName($destTable);
+    return $this->_runQuery(
+      $sql,
+      $legacySql,
+      $async,
+      [
+        'destinationTable'  => [
+          'projectId' => $this->gcpProjectName(),
+          'datasetId' => $this->getDataSetName(),
+          'tableId'   => $destTable,
+        ],
+        'createDisposition' => 'CREATE_IF_NEEDED',
+        'writeDisposition'  => 'WRITE_TRUNCATE',
+        'allowLargeResults' => true,
+      ]
+    );
+  }
+
+  /**
+   * @param string $sql
+   * @param bool   $async
+   * @param bool   $legacySql
+   * @param array  $extraOpts An array of options to add to the configuration.query part of the request config
+   *
+   * @return Job|QueryResults Returns a job if $async is true, otherwise returns QueryResults
+   */
+  private function _runQuery($sql, $async = false, $legacySql = true, $extraOpts = [])
+  {
+    $client = $this->getClient();
+    $jobConfig = $client->query(
+      $sql,
+      ['configuration' => ['query' => ['useLegacySql' => $legacySql] + $extraOpts]]
+    );
+    if($async)
+    {
+      return $client->startQuery($jobConfig);
+    }
+    return $client->runQuery($jobConfig);
   }
 
   /**
@@ -511,135 +408,23 @@ class BigQueryHelper
    * @param string $tableName
    *
    * @return string
-   * @throws \Exception
+   * @throws BigQueryException
    */
   private function _trimDatasetFromTableName($tableName)
   {
     if(strpos($tableName, '.') !== false)
     {
       $parts = explode('.', $tableName, 2);
-      if($parts[0] != $this->getDataSet())
+      if($parts[0] != $this->getDataSetName())
       {
-        throw new \Exception(
+        throw new BigQueryException(
           'Incorrect dataset in table name: ' . $tableName
-          . '. Expected dataset ' . $this->getDataSet()
+          . '. Expected dataset ' . $this->getDataSetName()
         );
       }
       $tableName = $parts[1];
     }
     return $tableName;
-  }
-
-  /**
-   * @param IBigQueryWriteable[] $rows          The rows to write
-   * @param \callable|null       $onError       Called when there is a fatal error writing to a table.
-   *                                            $onError($tableName, $dataKeys)
-   * @param \callable|null       $onSuccess     Called when a table's data has been written successfully
-   *                                            $onSuccess($tableName, $dataKeys)
-   */
-  public function writeWithRetries(
-    array $rows, $onError = null, $onSuccess = null
-  )
-  {
-    $groupedRows = $this->_groupRowsByTable($rows);
-    $rowsToWrite = $groupedRows;
-
-    $remainingAttempts = $totalAttempts = 5;
-
-    while(($remainingAttempts > 0) && (count($rowsToWrite) > 0))
-    {
-      $remainingAttempts--;
-      $attemptNum = $totalAttempts - $remainingAttempts;
-
-      if($attemptNum > 1)
-      {
-        $this->_debug("Retrying write. Attempt number " . $attemptNum);
-      }
-
-      $errors = $this->writeBatched($rowsToWrite);
-
-      $needDelay = false;
-      $rowsToWrite = [];
-      foreach($groupedRows as $tableName => $data)
-      {
-        $tags = array_keys($data);
-        $errorKey = $tableName;
-
-        if(isset($errors[$errorKey]))
-        {
-          $error = $errors[$errorKey];
-          $msg = $error instanceof \Google_Service_Exception
-            ? $error->getMessage() : $error;
-
-          $this->_debug(
-            "WARNING: Error writing to table " . $tableName
-            . " on attempt " . $attemptNum . " of " . $totalAttempts
-            . " : " . $msg
-          );
-
-          $errorState = $this->_handleTableError($error, $data);
-
-          switch($errorState)
-          {
-            case self::ERR_FATAL:
-              $this->_debug(
-                'ERROR: Fatal error writing to table ' . $tableName
-                . ' : ' . $msg
-              );
-              if($onError)
-              {
-                $onError($tableName, $tags);
-              }
-              break;
-            case self::ERR_DELAYED_RETRY:
-              $needDelay = true;
-              // break intentionally missing
-            case self::ERR_RETRY:
-              // make sure we retry after this error
-              /*if($remainingAttempts < 1)
-              {
-                $remainingAttempts++;
-              }*/
-              // break intentionally missing
-            default:
-              if($remainingAttempts < 1)
-              {
-                if($onError)
-                {
-                  $onError($tableName, $tags);
-                }
-                throw new \RuntimeException($msg);
-              }
-              $rowsToWrite[$tableName] = $data;
-              break;
-          }
-        }
-        else
-        {
-          if($onSuccess)
-          {
-            $onSuccess($tableName, $tags);
-          }
-        }
-      }
-
-      if(count($rowsToWrite) < 1)
-      {
-        break;
-      }
-
-      // Delay retries
-      if($needDelay)
-      {
-        // Long delay after creating tables etc.
-        sleep(10);
-      }
-      else
-      {
-        // backoff for increasing multiples of 500ms
-        usleep($attemptNum * 500000);
-      }
-    }
   }
 
   /**
@@ -666,29 +451,24 @@ class BigQueryHelper
   }
 
   /**
-   * @param IBigQueryWriteable[] $items            An array of items to write
-   *                                               to BigQuery
-   * @param bool                 $autoCreateTables If this is true then
-   *                                               datasets and tables will be
-   *                                               auto-created if they do not
-   *                                               exist. If this happens the
-   *                                               writes will be NOT retried
-   *                                               after creating the tables.
-   * @param callable|null        $onError          Function to call for each
-   *                                               set of errors. Called with
-   *                                               arguments ($tableName,
-   *                                               $tags, $error)
-   * @param callable|null        $onSuccess        Function to call for each
-   *                                               set of successfil writes.
-   *                                               Called with arguments
-   *                                               ($tableName, $tags)
+   * @param IBigQueryWriteable[] $items              An array of items to write to BigQuery. This should be indexed with
+   *                                                 unique tags (numbers should also work).
+   * @param bool                 $autoCreateTables   If this is true then datasets and tables will be auto-created if
+   *                                                 they do not exist. If this happens the writes will be NOT retried
+   *                                                 after creating the tables.
+   * @param bool                 $useTemplatedTables If true then use templated tables to perform the write
+   * @param callable|null        $onError            Function to call for each set of errors. Called with arguments
+   *                                                 ($tableName, $tags, $error)
+   * @param callable|null        $onSuccess          Function to call for each set of successfil writes. Called with
+   *                                                 arguments ($tableName, $tags)
    *
-   * @retun string[] Errors encountered during the operation, indexed by table
-   *        name
+   * @return string[] Errors encountered during the operation, indexed by table name
+   * @throws BigQueryException
+   * @throws ConflictException
    */
-  public function writeTemplatedBatch(
-    array $items, $autoCreateTables = false,
-    callable $onError = null, callable $onSuccess = null
+  public function writeRows(
+    array $items, $useTemplatedTables = false, $autoCreateTables = false, callable $onError = null,
+    callable $onSuccess = null
   )
   {
     $groupedItems = $this->_groupRowsByTable($items);
@@ -699,249 +479,125 @@ class BigQueryHelper
 
     $startTime = microtime(true);
     $totalRows = count($items);
+    $errorCount = 0;
 
-    $client = $this->getClient();
-    $service = $this->getService();
     $dataSet = $this->getDataSet();
+    $this->createDataset();
+
+    // Make a map of insert IDs to message tags
+    $idTagMap = [];
+    foreach($items as $tag => $item)
+    {
+      $idTagMap[$item->getBigQueryInsertId()] = $tag;
+    }
 
     // Build the batch of requests to send to BigQuery
-    $responses = [];
     $errors = [];
-    $client->setUseBatch(true);
-    try
+    /** @var IBigQueryWriteable[] $rows */
+    foreach($groupedItems as $fullTableName => $rows)
     {
-      $batch = new \Google_Http_Batch($client);
-
-      foreach($groupedItems as $fullTableName => $rows)
+      if(count($rows) < 1)
       {
-        list(, $templateTable, $suffix) = $this->_splitTableNameForTemplate(
-          $fullTableName
-        );
-
-        $bqRows = [];
-        foreach($rows as $row)
-        {
-          $bqRow = new \Google_Service_Bigquery_TableDataInsertAllRequestRows();
-          $bqRow->setJson($this->_serializeForBigQuery($row));
-          $bqRow->setInsertId($row->getBigQueryInsertId());
-          $bqRows[] = $bqRow;
-        }
-
-        $request = new \Google_Service_Bigquery_TableDataInsertAllRequest();
-        $request->setKind('bigquery#tableDataInsertAllRequest');
-        $request->setTemplateSuffix($suffix);
-        $request->setRows($bqRows);
-        $options = [];
-        /** @var \Google_Http_Request $insertReq */
-        $insertReq = $service->tabledata->insertAll(
-          $this->bigQueryProject(),
-          $dataSet,
-          $templateTable,
-          $request,
-          $options
-        );
-        $batch->add($insertReq, $fullTableName);
+        continue;
       }
+      /** @var IBigQueryWriteable $firstRow */
+      $firstRow = reset($rows);
 
-      $responses = $batch->execute();
-    }
-    finally
-    {
-      $client->setUseBatch(false);
-    }
-    $duration = microtime(true) - $startTime;
-
-    $errorRows = 0;
-    foreach(array_keys($groupedItems) as $tableName)
-    {
-      if(isset($responses['response-' . $tableName]))
+      $options = ['autoCreate' => $autoCreateTables];
+      if($useTemplatedTables)
       {
-        $response = $responses['response-' . $tableName];
-
-        if($response instanceof \Google_Service_Exception)
-        {
-          $errors[$tableName] = $response->getMessage();
-        }
-        else if($response instanceof \Google_Service_Bigquery_TableDataInsertAllResponse)
-        {
-          $insertErrors = $response->getInsertErrors();
-          if(!empty($insertErrors))
-          {
-            $msg = $this->_makeErrorsMsg($insertErrors);
-            $this->_log(
-              'Errors inserting into table ' . $dataSet . '.' . $tableName
-              . ': ' . $msg
-            );
-            $errors[$tableName] = $msg;
-          }
-        }
-        else
-        {
-          $errors[$tableName] = 'Unknown response type: '
-            . get_class($response);
-        }
+        list(, $targetTable, $suffix) = $this->_splitTableNameForTemplate($fullTableName);
+        $options ['templateSuffix'] = $suffix;
       }
       else
       {
-        $errors[$tableName] = 'No response from BigQuery';
+        $targetTable = $fullTableName;
       }
 
-      $tags = array_keys($groupedItems[$tableName]);
-      if(isset($errors[$tableName]))
+      if($autoCreateTables)
       {
-        $errorRows += count($tags);
-        if($onError)
-        {
-          $onError($tableName, $tags, $errors[$tableName]);
-        }
+        $options['tableMetadata'] = ['schema' => ['fields' => $firstRow->getBigQuerySchema()]];
+      }
 
-        if($autoCreateTables)
+      $bqRows = $this->_writeablesToRows($rows);
+      $result = $dataSet->table($targetTable)->insertRows($bqRows, $options);
+
+      $successTagsKeyed = array_fill_keys(array_keys($rows), true);
+      $failedTagsKeyed = [];
+      if(!$result->isSuccessful())
+      {
+        $failedRows = $result->failedRows();
+        foreach($failedRows as $row)
         {
-          $this->_handleTableError(
-            $errors[$tableName],
-            $groupedItems[$tableName],
-            true
-          );
+          $idx = $row['index'];
+          if(isset($rows[$idx]))
+          {
+            $tag = $idTagMap[$rows[$idx]->getBigQueryInsertId()];
+            $failedTagsKeyed[$tag] = true;
+            unset($successTagsKeyed[$tag]);
+          }
+
+          // Make the errors from all rows into a single string
+          if(!empty($row['errors']))
+          {
+            $msg = $this->_makeRowErrorsMsg($row);
+            $this->_log(
+              'Errors inserting into table ' . $this->getDataSetName() . '.' . $fullTableName . ': ' . $msg
+            );
+            $errors[$fullTableName] = $msg;
+
+            // TODO: Build $errMsg to send to onError callback
+          }
+
+          $errorCount++;
         }
       }
-      else if($onSuccess)
+
+      if($onError && (count($failedTagsKeyed) > 0))
       {
-        $onSuccess($tableName, $tags);
+        $onError(
+          $fullTableName,
+          array_keys($failedTagsKeyed),
+          isset($errors[$fullTableName]) ? $errors[$fullTableName] : 'Unknown error'
+        );
+      }
+      if($onSuccess && (count($successTagsKeyed) > 0))
+      {
+        $onSuccess($fullTableName, array_keys($successTagsKeyed));
       }
     }
 
+    $duration = microtime(true) - $startTime;
+
     $this->_debug(
-      'Wrote ' . ($totalRows - $errorRows) . '/' . $totalRows
-      . ' rows in ' . round($duration * 1000) . 'ms'
+      'Wrote ' . ($totalRows - $errorCount) . '/' . $totalRows . ' rows in ' . round($duration * 1000) . 'ms'
     );
 
     return $errors;
   }
 
   /**
-   * @param IBigQueryWriteable[][] $groupedRows The rows to insert grouped by table name
+   * Drop a table
    *
-   * @return string[]|\Google_Service_Exception[] An array of errors encountered during the insert, indexed
-   *                  by table name
+   * @param string $tableName
+   *
+   * @throws NotFoundException
    */
-  public function writeBatched(array $groupedRows)
+  public function dropTable($tableName)
   {
-    // Remove empty datasets
-    foreach($groupedRows as $tableName => $rows)
-    {
-      if(count($rows) < 1)
-      {
-        unset($groupedRows[$tableName]);
-      }
-    }
-    // Bail out if there is nothing to write
-    if(count($groupedRows) < 1)
-    {
-      return [];
-    }
-
-    $startTime = floor(microtime(true) * 1000);
-
-    $client = $this->getClient();
-    $service = $this->getService();
     $dataSet = $this->getDataSet();
-
-    $client->setUseBatch(true);
-    $batch = new \Google_Http_Batch($client);
-
     try
     {
-      // list of tables that were written to
-      $tableList = [];
-      $totalRows = $writtenRows = 0;
-      foreach($groupedRows as $tableName => $rows)
-      {
-        /** @var IBigQueryWriteable[] $rows */
-        $request = new \Google_Service_Bigquery_TableDataInsertAllRequest();
-        $request->setKind('bigquery#tableDataInsertAllRequest');
-        $numRows = count($rows);
-        $totalRows += $numRows;
-        $tableList[$tableName] = true;
-
-        $bqRows = [];
-        foreach($rows as $queuedRow)
-        {
-          $row = new \Google_Service_Bigquery_TableDataInsertAllRequestRows();
-          $row->setJson($this->_serializeForBigQuery($queuedRow));
-          $row->setInsertId($queuedRow->getBigQueryInsertId());
-          $bqRows[] = $row;
-        }
-
-        $request->setRows($bqRows);
-        $options = [];
-        /** @var \Google_Http_Request $insertReq */
-        $insertReq = $service->tabledata->insertAll(
-          $this->bigQueryProject(),
-          $dataSet,
-          $tableName,
-          $request,
-          $options
-        );
-        $batch->add($insertReq, $tableName);
-      }
-
-      $responses = $batch->execute();
+      $this->_log("Dropping table " . $tableName);
+      $dataSet->table($tableName)->delete();
     }
-    finally
+    catch(NotFoundException $e)
     {
-      $client->setUseBatch(false);
-    }
-
-    $errors = [];
-    foreach(array_keys($tableList) as $tableName)
-    {
-      if(isset($responses['response-' . $tableName]))
+      if($e->getCode() != 404)
       {
-        $response = $responses['response-' . $tableName];
-
-        if($response instanceof \Google_Service_Exception)
-        {
-          $errors[$tableName] = $response->getMessage();
-        }
-        else if($response instanceof \Google_Service_Bigquery_TableDataInsertAllResponse)
-        {
-          $insertErrors = $response->getInsertErrors();
-          if(!empty($insertErrors))
-          {
-            $msg = $this->_makeErrorsMsg($insertErrors);
-            $this->_debug(
-              'Errors inserting into table ' . $dataSet . '.' . $tableName . ': '
-              . $msg
-            );
-            $errors[$tableName] = $msg;
-          }
-          else
-          {
-            $writtenRows += count($groupedRows[$tableName]);
-          }
-        }
-        else
-        {
-          $errors[$tableName] = 'Unknown response type: ' . get_class(
-              $response
-            );
-        }
-      }
-      else
-      {
-        $errors[$tableName] = 'No response from BigQuery';
+        throw $e;
       }
     }
-
-    $duration = floor(microtime(true) * 1000) - $startTime;
-
-    /*$this->_debug(
-      'Wrote ' . $writtenRows . ' of ' . $totalRows . ' rows to '
-      . count($groupedRows) . ' table(s) in ' . $duration . ' ms with '
-      . count($errors) . ' error(s)'
-    );*/
-
-    return $errors;
   }
 
   /**
@@ -950,14 +606,14 @@ class BigQueryHelper
    * @param string $tableName
    *
    * @return string[]
-   * @throws \Exception
+   * @throws BigQueryException
    */
   protected function _splitTableNameForTemplate($tableName)
   {
     preg_match('/^(.*)(_[0-9]{8})$/', $tableName, $matches);
     if(count($matches) != 3)
     {
-      throw new \Exception(
+      throw new BigQueryException(
         'Table name not suitable for using template: ' . $tableName
       );
     }
@@ -966,96 +622,87 @@ class BigQueryHelper
   }
 
   /**
-   * Handle errors from inserts - create missing datasets and tables if
-   * required and return the appropriate error state
+   * @param IBigQueryWriteable[] $writeables
    *
-   * @param string|\Google_Service_Exception $errorMsg
-   * @param IBigQueryWriteable[]             $data
-   *
-   * @return int
+   * @return array An array in an appropriate format to pass to Table::insertRows
+   * @throws BigQueryException
    */
-  protected function _handleTableError($errorMsg, array $data, $useTemplateTable = false)
+  protected function _writeablesToRows(array $writeables)
   {
-    $result = self::ERR_UNKNOWN;
-
-    if($errorMsg instanceof \Google_Service_Exception)
+    $rows = [];
+    foreach($writeables as $key => $writeable)
     {
-      if($errorMsg->allowedRetries() == 0)
-      {
-        $result = self::ERR_FATAL;
-      }
+      $rows[$key] = [
+        'insertId' => $writeable->getBigQueryInsertId(),
+        'data'     => $this->_serializeRow($writeable),
+      ];
     }
-    else
-    {
-      /** @var IBigQueryWriteable $firstObj */
-      $firstObj = reset($data);
-      try
-      {
-        if(stristr($errorMsg, 'Not found: Dataset'))
-        {
-          $this->createDataset();
-          $this->createTableForObject($firstObj, $useTemplateTable);
-          $result = self::ERR_DELAYED_RETRY;
-        }
-        else if(stristr($errorMsg, 'Not found: Table'))
-        {
-          $this->createTableForObject($firstObj, $useTemplateTable);
-          $result = self::ERR_DELAYED_RETRY;
-        }
-      }
-      catch(\Exception $e)
-      {
-        $this->_log(
-          "ERROR: (" . $e->getCode() . ") " . $e->getMessage() . "\n"
-          . $e->getTraceAsString()
-        );
-        $result = self::ERR_FATAL;
-      }
-    }
-    return $result;
+    return $rows;
   }
 
-  protected function _serializeForBigQuery(IBigQueryWriteable $row)
+  /**
+   * @param IBigQueryWriteable $row
+   *
+   * @return array
+   * @throws BigQueryException
+   */
+  protected function _serializeRow(IBigQueryWriteable $row)
   {
     $bqData = [];
     $rowData = $row->getBigQueryData();
     $schema = $row->getBigQuerySchema();
+    $hasRowTimestamp = false;
     foreach($schema as $field)
     {
       $fieldName = $field['name'];
-      $value = isset($rowData[$fieldName]) ? $rowData[$fieldName] : '';
-      $bqData[$fieldName] = $this->_serializeField(
-        $value,
-        $field['type'],
-        $field['name']
-      );
+      if($fieldName == 'rowTimestamp')
+      {
+        $hasRowTimestamp = true;
+      }
+      else
+      {
+        $value = isset($rowData[$fieldName]) ? $rowData[$fieldName] : '';
+        $bqData[$fieldName] = $this->_serializeField($value, $field['type'], $field['name']);
+      }
     }
 
-    $rowTimestamp = $row->getBigQueryRowTimestamp();
-    if($rowTimestamp)
+    if($hasRowTimestamp)
     {
-      $bqData['rowTimestamp'] = $rowTimestamp;
+      $rowTimestamp = $row->getBigQueryRowTimestamp();
+      if($rowTimestamp)
+      {
+        $bqData['rowTimestamp'] = $rowTimestamp;
+      }
     }
     return $bqData;
   }
 
   /**
-   * @param $value
-   * @param $fieldType
-   * @param $fieldName
+   * @param mixed  $value
+   * @param string $fieldType
+   * @param string $fieldName
    *
    * @return bool|float|int|string
-   * @throws \Exception
+   * @throws BigQueryException
    */
   protected function _serializeField($value, $fieldType, $fieldName)
   {
+    $errMsg = "Invalid data '" . $value . "' for " . $fieldType . " field `" . $fieldName . "`";
     switch($fieldType)
     {
       case 'integer':
       case 'timestamp':
+        if(!is_numeric($value))
+        {
+          throw new BigQueryException($errMsg);
+        }
         $tidyData = (int)$value;
         break;
       case 'float':
+        if(!is_numeric($value))
+        {
+          throw new BigQueryException($errMsg);
+        }
         $tidyData = (float)$value;
         break;
       case 'boolean':
@@ -1065,42 +712,31 @@ class BigQueryHelper
         $tidyData = (string)$value;
         break;
       default:
-        throw new \Exception(
-          "Unable to serialize data for BigQuery: Unknown type '"
-          . $fieldType . "' for field '" . $fieldName . "'"
+        throw new BigQueryException(
+          "Unable to serialize data for BigQuery: Unknown type '" . $fieldType . "' for field `" . $fieldName . "`"
         );
     }
     return $tidyData;
   }
 
   /**
-   * @param \Google_Service_Bigquery_TableDataInsertAllResponseInsertErrors[] $insertErrors
+   * @param array $rowError
    *
    * @return string
    */
-  private function _makeErrorsMsg(array $insertErrors)
+  private function _makeRowErrorsMsg(array $rowError)
   {
-    $insertMessages = [];
-    foreach($insertErrors as $insertError)
+    $messages = [];
+    foreach($rowError['errors'] as $error)
     {
-      /** @var \Google_Service_Bigquery_TableDataInsertAllResponseInsertErrors $insertError */
-      $messages = [];
-      foreach($insertError as $error)
-      {
-        /** @var \Google_Service_Bigquery_ErrorProto $error */
-        $messages[] = sprintf(
-          '[reason: %s, location: %s, message: %s]',
-          $error->getReason(),
-          $error->getLocation(),
-          $error->getMessage()
-        );
-      }
-      $insertMessages[] = sprintf(
-        "Index %d: %s",
-        $insertError->getIndex(),
-        implode(', ', $messages)
+      $messages[] = sprintf(
+        '[reason: %s, location: %s, message: %s]',
+        $error['reason'],
+        $error['location'],
+        $error['message']
       );
     }
-    return implode("\n", $insertMessages);
+
+    return sprintf("Index %d: %s", $rowError['index'], implode(', ', $messages));
   }
 }

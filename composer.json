@@ -3,7 +3,7 @@
   "description": "Helper code for Google BigQuery",
   "type": "library",
   "require": {
-    "google/apiclient": "~1",
+    "google/cloud-bigquery": "~1.2",
     "packaged/helpers": "~1.0"
   },
   "license": "MIT",
@@ -13,7 +13,6 @@
       "email": "richard.gooding@justdevelop.it"
     }
   ],
-  "minimum-stability": "dev",
   "autoload": {
     "psr-4": {
       "Packaged\\BigQuery\\": "src/"
