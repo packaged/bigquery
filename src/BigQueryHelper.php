@@ -527,12 +527,13 @@ class BigQueryHelper
       if(!$result->isSuccessful())
       {
         $failedRows = $result->failedRows();
+        $rowsByIdx = array_values($rows);
         foreach($failedRows as $row)
         {
           $idx = $row['index'];
-          if(isset($rows[$idx]))
+          if(isset($rowsByIdx[$idx]))
           {
-            $tag = $idTagMap[$rows[$idx]->getBigQueryInsertId()];
+            $tag = $idTagMap[$rowsByIdx[$idx]->getBigQueryInsertId()];
             $failedTagsKeyed[$tag] = true;
             unset($successTagsKeyed[$tag]);
           }
@@ -541,12 +542,10 @@ class BigQueryHelper
           if(!empty($row['errors']))
           {
             $msg = $this->_makeRowErrorsMsg($row);
-            $this->_log(
+            $this->_debug(
               'Errors inserting into table ' . $this->getDataSetName() . '.' . $fullTableName . ': ' . $msg
             );
             $errors[$fullTableName] = $msg;
-
-            // TODO: Build $errMsg to send to onError callback
           }
 
           $errorCount++;
