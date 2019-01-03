@@ -357,16 +357,18 @@ class BigQueryHelper
    * @param string $destTable
    * @param bool   $async
    * @param bool   $legacySql
+   * @param bool   $truncateTable
    *
    * @return Job|QueryResults Returns a Job if $async is true, otherwise returns QueryResults
+   * @throws BigQueryException
    */
-  public function runQueryIntoTable($sql, $destTable, $async = false, $legacySql = true)
+  public function runQueryIntoTable($sql, $destTable, $async = false, $legacySql = true, $truncateTable = true)
   {
     $destTable = $this->_trimDatasetFromTableName($destTable);
     return $this->_runQuery(
       $sql,
-      $legacySql,
       $async,
+      $legacySql,
       [
         'destinationTable'  => [
           'projectId' => $this->gcpProjectName(),
@@ -374,7 +376,7 @@ class BigQueryHelper
           'tableId'   => $destTable,
         ],
         'createDisposition' => 'CREATE_IF_NEEDED',
-        'writeDisposition'  => 'WRITE_TRUNCATE',
+        'writeDisposition'  => $truncateTable ? 'WRITE_TRUNCATE' : 'WRITE_APPEND',
         'allowLargeResults' => true,
       ]
     );
