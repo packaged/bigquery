@@ -5,6 +5,8 @@ class BigQueryType
 {
   /** 2 MB UTF-8 encoded string */
   const STRING = 'string';
+  /** Binary bytes */
+  const BYTES = 'bytes';
   /** 64-bit signed integer */
   const INTEGER = 'integer';
   /** Double-precision floating-point format */

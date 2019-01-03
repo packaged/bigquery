@@ -689,26 +689,29 @@ class BigQueryHelper
     $errMsg = "Invalid data '" . $value . "' for " . $fieldType . " field `" . $fieldName . "`";
     switch($fieldType)
     {
-      case 'integer':
-      case 'timestamp':
+      case BigQueryType::INTEGER:
+      case BigQueryType::TIMESTAMP:
         if(!is_numeric($value))
         {
           throw new BigQueryException($errMsg);
         }
         $tidyData = (int)$value;
         break;
-      case 'float':
+      case BigQueryType::FLOAT:
         if(!is_numeric($value))
         {
           throw new BigQueryException($errMsg);
         }
         $tidyData = (float)$value;
         break;
-      case 'boolean':
+      case BigQueryType::BOOLEAN:
         $tidyData = (bool)$value;
         break;
-      case 'string':
+      case BigQueryType::STRING:
         $tidyData = (string)$value;
+        break;
+      case BigQueryType::BYTES:
+        $tidyData = base64_encode($value);
         break;
       default:
         throw new BigQueryException(
