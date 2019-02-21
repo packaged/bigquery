@@ -603,7 +603,7 @@ class BigQueryHelper
     $thisBatch = [];
     foreach($rows as $row)
     {
-      $rowSize = strlen(json_encode($row)) + 1; // +1 accounts for the comma when they are json_encoded together later
+      $rowSize = strlen(json_encode($row));
 
       if(($batchSize + $rowSize) > self::MAX_REQUEST_DATA_SIZE)
       {
