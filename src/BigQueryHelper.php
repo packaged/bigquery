@@ -10,6 +10,9 @@ use Google\Cloud\Core\Exception\NotFoundException;
 
 class BigQueryHelper
 {
+  /** @var int Max size of the data to put in a BigQuery request when writing rows. Rememeber to allow some overhead. */
+  const MAX_REQUEST_DATA_SIZE = 8388608; // 8MiB
+
   private $_credentials;
   /** @var BigQueryClient */
   private $_client = null;
@@ -292,8 +295,7 @@ class BigQueryHelper
   {
     $tableNames = [];
     $this->iterateTables(
-      function ($tableName) use (&$tableNames)
-      {
+      function ($tableName) use (&$tableNames) {
         $tableNames[] = $tableName;
       }
     );
@@ -521,36 +523,40 @@ class BigQueryHelper
         $options['tableMetadata'] = ['schema' => ['fields' => $firstRow->getBigQuerySchema()]];
       }
 
-      $bqRows = $this->_writeablesToRows($rows);
-      $result = $dataSet->table($targetTable)->insertRows($bqRows, $options);
-
-      $successTagsKeyed = array_fill_keys(array_keys($rows), true);
       $failedTagsKeyed = [];
-      if(!$result->isSuccessful())
+      $successTagsKeyed = array_fill_keys(array_keys($rows), true);
+
+      foreach($this->_batchRowsBySize($rows) as $rowBatch)
       {
-        $failedRows = $result->failedRows();
-        $rowsByIdx = array_values($rows);
-        foreach($failedRows as $row)
+        $bqRows = $this->_writeablesToRows($rowBatch);
+        $result = $dataSet->table($targetTable)->insertRows($bqRows, $options);
+
+        if(!$result->isSuccessful())
         {
-          $idx = $row['index'];
-          if(isset($rowsByIdx[$idx]))
+          $failedRows = $result->failedRows();
+          $rowsByIdx = array_values($rowBatch);
+          foreach($failedRows as $row)
           {
-            $tag = $idTagMap[$rowsByIdx[$idx]->getBigQueryInsertId()];
-            $failedTagsKeyed[$tag] = true;
-            unset($successTagsKeyed[$tag]);
-          }
+            $idx = $row['index'];
+            if(isset($rowsByIdx[$idx]))
+            {
+              $tag = $idTagMap[$rowsByIdx[$idx]->getBigQueryInsertId()];
+              $failedTagsKeyed[$tag] = true;
+              unset($successTagsKeyed[$tag]);
+            }
 
-          // Make the errors from all rows into a single string
-          if(!empty($row['errors']))
-          {
-            $msg = $this->_makeRowErrorsMsg($row);
-            $this->_debug(
-              'Errors inserting into table ' . $this->getDataSetName() . '.' . $fullTableName . ': ' . $msg
-            );
-            $errors[$fullTableName] = $msg;
-          }
+            // Make the errors from all rows into a single string
+            if(!empty($row['errors']))
+            {
+              $msg = $this->_makeRowErrorsMsg($row);
+              $this->_debug(
+                'Errors inserting into table ' . $this->getDataSetName() . '.' . $fullTableName . ': ' . $msg
+              );
+              $errors[$fullTableName] = $msg;
+            }
 
-          $errorCount++;
+            $errorCount++;
+          }
         }
       }
 
@@ -575,6 +581,51 @@ class BigQueryHelper
     );
 
     return $errors;
+  }
+
+  /**
+   * Group an array of BigQuery rows into batches where the full size of each batch does not exceed
+   * MAX_REQUEST_DATA_SIZE
+   *
+   * @param array $rows
+   *
+   * @return array[]
+   */
+  private function _batchRowsBySize(array $rows)
+  {
+    if(strlen(json_encode($rows)) <= self::MAX_REQUEST_DATA_SIZE)
+    {
+      return [$rows];
+    }
+
+    $groupedRows = [];
+    $batchSize = 0;
+    $thisBatch = [];
+    foreach($rows as $row)
+    {
+      $rowSize = strlen(json_encode($row)) + 1; // +1 accounts for the comma when they are json_encoded together later
+
+      if(($batchSize + $rowSize) > self::MAX_REQUEST_DATA_SIZE)
+      {
+        // Add this batch to the output and start a new batch
+        if(count($thisBatch) > 0)
+        {
+          $groupedRows[] = $thisBatch;
+        }
+        $batchSize = 0;
+        $thisBatch = [];
+      }
+
+      $thisBatch[] = $row;
+      $batchSize += $rowSize;
+    }
+    // Add the last batch to the output
+    if(count($thisBatch) > 0)
+    {
+      $groupedRows[] = $thisBatch;
+    }
+
+    return $groupedRows;
   }
 
   /**
