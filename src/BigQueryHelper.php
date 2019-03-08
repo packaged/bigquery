@@ -380,7 +380,8 @@ class BigQueryHelper
         'createDisposition' => 'CREATE_IF_NEEDED',
         'writeDisposition'  => $truncateTable ? 'WRITE_TRUNCATE' : 'WRITE_APPEND',
         'allowLargeResults' => true,
-      ]
+      ],
+      ['maxResults' => 1]
     );
   }
 
@@ -388,11 +389,12 @@ class BigQueryHelper
    * @param string $sql
    * @param bool   $async
    * @param bool   $legacySql
-   * @param array  $extraOpts An array of options to add to the configuration.query part of the request config
+   * @param array  $extraOpts           An array of options to add to the configuration.query part of the request config
+   * @param array  $queryResultsOptions Options to pass in when retrieving the results in synchronous queries
    *
    * @return Job|QueryResults Returns a job if $async is true, otherwise returns QueryResults
    */
-  private function _runQuery($sql, $async = false, $legacySql = true, $extraOpts = [])
+  private function _runQuery($sql, $async = false, $legacySql = true, $extraOpts = [], $queryResultsOptions = [])
   {
     $client = $this->getClient();
     $jobConfig = $client->query(
@@ -403,7 +405,7 @@ class BigQueryHelper
     {
       return $client->startQuery($jobConfig);
     }
-    return $client->runQuery($jobConfig);
+    return $client->runQuery($jobConfig, $queryResultsOptions);
   }
 
   /**
