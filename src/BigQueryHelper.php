@@ -1,6 +1,8 @@
 <?php
 namespace Packaged\BigQuery;
 
+use Fortifi\Fortifi\Applications\Developer\Exceptions\TimeoutException;
+use Fortifi\Fortifi\Infrastructure\Logging\Log;
 use Google\Cloud\BigQuery\BigQueryClient;
 use Google\Cloud\BigQuery\Dataset;
 use Google\Cloud\BigQuery\Job;
@@ -328,10 +330,26 @@ class BigQueryHelper
    * @param array  $extraQueryOpts An array of options to add to the configuration.query part of the request config
    *
    * @return Job|QueryResults Returns a Job if $async is true, otherwise returns QueryResults
+   * @throws BigQueryTimeoutException thrown if job is incomplete
    */
   public function runQuery($sql, $async = false, $legacySql = true, $extraQueryOpts = [])
   {
-    return $this->_runQuery($sql, $async, $legacySql, $extraQueryOpts);
+    $result = $this->_runQuery($sql, $async, $legacySql, $extraQueryOpts);
+
+    // Check whether the query has completed
+    if(!$async && $info = $result->info() && empty($info['jobComplete']))
+    {
+      throw new BigQueryTimeoutException(
+        "Timed out retrieving BigQuery data",
+        0,
+        null,
+        $sql,
+        $info["jobReference"]["projectId"] ?? "",
+        $info["jobReference"]["jobId"] ?? "",
+        $info["jobReference"]["location"] ?? ""
+      );
+    }
+    return $result;
   }
 
   /**
