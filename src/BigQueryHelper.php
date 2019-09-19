@@ -337,7 +337,7 @@ class BigQueryHelper
     $result = $this->_runQuery($sql, $async, $legacySql, $extraQueryOpts);
 
     // Check whether the query has completed
-    if(!$async && $info = $result->info() && empty($info['jobComplete']))
+    if(!$async && ($info = $result->info()) && empty($info['jobComplete']))
     {
       throw new BigQueryTimeoutException(
         "Timed out retrieving BigQuery data",
