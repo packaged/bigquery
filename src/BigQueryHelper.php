@@ -330,26 +330,11 @@ class BigQueryHelper
    * @param array  $extraQueryOpts An array of options to add to the configuration.query part of the request config
    *
    * @return Job|QueryResults Returns a Job if $async is true, otherwise returns QueryResults
-   * @throws BigQueryTimeoutException thrown if job is incomplete
+   * @throws BigQueryTimeoutException
    */
   public function runQuery($sql, $async = false, $legacySql = true, $extraQueryOpts = [])
   {
-    $result = $this->_runQuery($sql, $async, $legacySql, $extraQueryOpts);
-
-    // Check whether the query has completed
-    if(!$async && ($info = $result->info()) && empty($info['jobComplete']))
-    {
-      throw new BigQueryTimeoutException(
-        "Timed out retrieving BigQuery data",
-        0,
-        null,
-        $sql,
-        $info["jobReference"]["projectId"] ?? "",
-        $info["jobReference"]["jobId"] ?? "",
-        $info["jobReference"]["location"] ?? ""
-      );
-    }
-    return $result;
+    return $this->_runQuery($sql, $async, $legacySql, $extraQueryOpts);
   }
 
   /**
@@ -411,6 +396,7 @@ class BigQueryHelper
    * @param array  $queryResultsOptions Options to pass in when retrieving the results in synchronous queries
    *
    * @return Job|QueryResults Returns a job if $async is true, otherwise returns QueryResults
+   * @throws BigQueryTimeoutException
    */
   private function _runQuery($sql, $async = false, $legacySql = true, $extraOpts = [], $queryResultsOptions = [])
   {
@@ -423,7 +409,22 @@ class BigQueryHelper
     {
       return $client->startQuery($jobConfig);
     }
-    return $client->runQuery($jobConfig, $queryResultsOptions);
+    $result = $client->runQuery($jobConfig, $queryResultsOptions);
+
+    // Check whether the query has completed
+    if(($info = $result->info()) && empty($info['jobComplete']))
+    {
+      throw new BigQueryTimeoutException(
+        "Timed out retrieving BigQuery data",
+        0,
+        null,
+        $sql,
+        isset($info["jobReference"]["projectId"]) ? $info["jobReference"]["projectId"] : '',
+        isset($info["jobReference"]["jobId"]) ? $info["jobReference"]["jobId"] : '',
+        isset($info["jobReference"]["location"]) ? $info["jobReference"]["location"] : '',
+      );
+    }
+    return $result;
   }
 
   /**
