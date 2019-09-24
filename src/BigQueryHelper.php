@@ -1,8 +1,6 @@
 <?php
 namespace Packaged\BigQuery;
 
-use Fortifi\Fortifi\Applications\Developer\Exceptions\TimeoutException;
-use Fortifi\Fortifi\Infrastructure\Logging\Log;
 use Google\Cloud\BigQuery\BigQueryClient;
 use Google\Cloud\BigQuery\Dataset;
 use Google\Cloud\BigQuery\Job;
@@ -12,7 +10,7 @@ use Google\Cloud\Core\Exception\NotFoundException;
 
 class BigQueryHelper
 {
-  /** @var int Max size of the data to put in a BigQuery request when writing rows. Rememeber to allow some overhead. */
+  /** @var int Max size of the data to put in a BigQuery request when writing rows. Remember to allow some overhead. */
   const MAX_REQUEST_DATA_SIZE = 8388608; // 8MiB
 
   private $_credentials;
@@ -412,7 +410,8 @@ class BigQueryHelper
     $result = $client->runQuery($jobConfig, $queryResultsOptions);
 
     // Check whether the query has completed
-    if(($info = $result->info()) && empty($info['jobComplete']))
+    $info = $result->info();
+    if($info && empty($info['jobComplete']))
     {
       throw new BigQueryTimeoutException(
         "Timed out retrieving BigQuery data",
@@ -421,7 +420,7 @@ class BigQueryHelper
         $sql,
         isset($info["jobReference"]["projectId"]) ? $info["jobReference"]["projectId"] : '',
         isset($info["jobReference"]["jobId"]) ? $info["jobReference"]["jobId"] : '',
-        isset($info["jobReference"]["location"]) ? $info["jobReference"]["location"] : '',
+        isset($info["jobReference"]["location"]) ? $info["jobReference"]["location"] : ''
       );
     }
     return $result;
