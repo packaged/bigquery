@@ -10,7 +10,7 @@ use Google\Cloud\Core\Exception\NotFoundException;
 
 class BigQueryHelper
 {
-  /** @var int Max size of the data to put in a BigQuery request when writing rows. Rememeber to allow some overhead. */
+  /** @var int Max size of the data to put in a BigQuery request when writing rows. Remember to allow some overhead. */
   const MAX_REQUEST_DATA_SIZE = 8388608; // 8MiB
 
   private $_credentials;
@@ -328,6 +328,7 @@ class BigQueryHelper
    * @param array  $extraQueryOpts An array of options to add to the configuration.query part of the request config
    *
    * @return Job|QueryResults Returns a Job if $async is true, otherwise returns QueryResults
+   * @throws BigQueryTimeoutException
    */
   public function runQuery($sql, $async = false, $legacySql = true, $extraQueryOpts = [])
   {
@@ -393,6 +394,7 @@ class BigQueryHelper
    * @param array  $queryResultsOptions Options to pass in when retrieving the results in synchronous queries
    *
    * @return Job|QueryResults Returns a job if $async is true, otherwise returns QueryResults
+   * @throws BigQueryTimeoutException
    */
   private function _runQuery($sql, $async = false, $legacySql = true, $extraOpts = [], $queryResultsOptions = [])
   {
@@ -405,7 +407,23 @@ class BigQueryHelper
     {
       return $client->startQuery($jobConfig);
     }
-    return $client->runQuery($jobConfig, $queryResultsOptions);
+    $result = $client->runQuery($jobConfig, $queryResultsOptions);
+
+    // Check whether the query has completed
+    $info = $result->info();
+    if($info && empty($info['jobComplete']))
+    {
+      throw new BigQueryTimeoutException(
+        "Timed out retrieving BigQuery data",
+        0,
+        null,
+        $sql,
+        isset($info["jobReference"]["projectId"]) ? $info["jobReference"]["projectId"] : '',
+        isset($info["jobReference"]["jobId"]) ? $info["jobReference"]["jobId"] : '',
+        isset($info["jobReference"]["location"]) ? $info["jobReference"]["location"] : ''
+      );
+    }
+    return $result;
   }
 
   /**
