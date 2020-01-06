@@ -759,7 +759,8 @@ class BigQueryHelper
    */
   protected function _serializeField($value, $fieldType, $fieldName)
   {
-    $errMsg = "Invalid data '" . $value . "' for " . $fieldType . " field `" . $fieldName . "`";
+    $errMsg = "Invalid data '" . (is_scalar($value) ? $value : gettype($value))
+      . "' for " . $fieldType . " field `" . $fieldName . "`";
     switch($fieldType)
     {
       case BigQueryType::INTEGER:
