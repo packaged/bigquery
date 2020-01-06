@@ -781,7 +781,7 @@ class BigQueryHelper
         $tidyData = (bool)$value;
         break;
       case BigQueryType::STRING:
-        $tidyData = (string)$value;
+        $tidyData = is_array($value) ? implode(', ', $value) : (string)$value;
         break;
       case BigQueryType::BYTES:
         $tidyData = base64_encode($value);
