@@ -399,10 +399,8 @@ class BigQueryHelper
   private function _runQuery($sql, $async = false, $legacySql = true, $extraOpts = [], $queryResultsOptions = [])
   {
     $client = $this->getClient();
-    $jobConfig = $client->query(
-      $sql,
-      ['configuration' => ['query' => ['useLegacySql' => $legacySql] + $extraOpts]]
-    );
+    $jobConfig = $client->query($sql, ['configuration' => ['query' => $extraOpts]]);
+    $jobConfig->useLegacySql($legacySql);
     if($async)
     {
       return $client->startQuery($jobConfig);
@@ -491,7 +489,7 @@ class BigQueryHelper
    * @throws ConflictException
    */
   public function writeRows(
-    array $items, $useTemplatedTables = false, $autoCreateTables = false, callable $onError = null,
+    array    $items, $useTemplatedTables = false, $autoCreateTables = false, callable $onError = null,
     callable $onSuccess = null
   )
   {
