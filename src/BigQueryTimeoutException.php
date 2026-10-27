@@ -11,7 +11,7 @@ class BigQueryTimeoutException extends BigQueryException
   protected $_query;
 
   public function __construct(
-    $message = "", $code = 0, Throwable $previous = null, $query = "", $projectId = "", $jobId = "", $location = ""
+    $message = "", $code = 0, ?Throwable $previous = null, $query = "", $projectId = "", $jobId = "", $location = ""
   )
   {
     parent::__construct(

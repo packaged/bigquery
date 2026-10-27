@@ -489,8 +489,8 @@ class BigQueryHelper
    * @throws ConflictException
    */
   public function writeRows(
-    array    $items, $useTemplatedTables = false, $autoCreateTables = false, callable $onError = null,
-    callable $onSuccess = null
+    array    $items, $useTemplatedTables = false, $autoCreateTables = false, ?callable $onError = null,
+    ?callable $onSuccess = null
   )
   {
     $groupedItems = $this->_groupRowsByTable($items);
