@@ -5,6 +5,9 @@
   "require": {
     "google/cloud-bigquery": "~1.2"
   },
+  "require-dev": {
+    "phpunit/phpunit": "^9.6"
+  },
   "license": "MIT",
   "authors": [
     {
@@ -15,6 +18,11 @@
   "autoload": {
     "psr-4": {
       "Packaged\\BigQuery\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Packaged\\BigQuery\\Tests\\": "tests/"
     }
   }
 }
