@@ -23,6 +23,7 @@ class BigQueryType
     switch($type)
     {
       case self::STRING:
+      case self::BYTES:
       case self::INTEGER:
       case self::FLOAT:
       case self::BOOLEAN:
