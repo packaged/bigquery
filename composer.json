@@ -3,8 +3,7 @@
   "description": "Helper code for Google BigQuery",
   "type": "library",
   "require": {
-    "google/cloud-bigquery": "~1.2",
-    "packaged/helpers": "~1.0 || ^2.0"
+    "google/cloud-bigquery": "~1.2"
   },
   "license": "MIT",
   "authors": [
